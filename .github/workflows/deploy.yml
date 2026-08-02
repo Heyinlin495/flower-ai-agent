@@ -124,7 +124,14 @@ jobs:
 
             # 拉取最新镜像并重启（仅变更时重建）
             docker compose pull
-            docker compose up -d
+            # 失败时采集容器日志，便于定位（如 .env 缺失、应用启动报错等）
+            docker compose up -d || {
+              echo "❌ docker compose up 失败，收集诊断信息："
+              docker compose ps -a
+              docker compose logs --tail 100 backend
+              docker compose logs --tail 50 frontend
+              exit 1
+            }
 
             # 清理旧镜像（保留最近 2 个版本）
             docker image prune -af --filter "until=72h"
