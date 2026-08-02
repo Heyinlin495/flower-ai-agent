@@ -21,7 +21,8 @@ def main():
         sys.executable, "-m", "streamlit", "run",
         "frontend/app.py",
         "--server.port", "8501",
-        "--server.address", "localhost"
+        # 绑定 0.0.0.0：Docker 端口映射需要（绑定 localhost 时外部流量进不来）
+        "--server.address", "0.0.0.0"
     ])
 
 
