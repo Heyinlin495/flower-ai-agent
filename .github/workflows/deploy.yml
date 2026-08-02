@@ -50,9 +50,8 @@ jobs:
         with:
           context: .
           push: true
-          # 同一 tag 复用构建缓存，二次构建快
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # 从 GHCR 已有镜像复用层缓存（push 到 registry 自动带缓存）
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
           # 日期 tag（可回滚）+ 滚动 latest
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
