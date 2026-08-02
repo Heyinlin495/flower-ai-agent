@@ -304,6 +304,40 @@ with st.container(horizontal_alignment="center"):
     st.title("🌸 花卉识别 AI 助手", text_alignment="center")
     st.caption("上传花卉图片或输入问题，AI 为您提供专业识别和养护建议", text_alignment="center")
 
+# 图片 URL 识别弹窗（@st.dialog 装饰器模式，需在按钮之前定义）
+@st.dialog("通过图片链接识别")
+def url_recognition_dialog():
+    st.caption("粘贴图片 URL，AI 将识别其中的花卉")
+    url_input = st.text_input(
+        "图片链接",
+        placeholder="https://example.com/flower.jpg",
+        label_visibility="collapsed",
+    )
+    col_url1, col_url2 = st.columns(2)
+    with col_url1:
+        if st.button("识别", type="primary", width="stretch"):
+            if url_input:
+                # 先存入 session_state，重跑后统一处理（避免 rerun 丢失识别结果）
+                st.session_state._pending_url_recognition = url_input
+                st.rerun()
+            else:
+                st.warning("请先输入图片链接")
+    with col_url2:
+        if st.button("取消", width="stretch"):
+            st.rerun()
+
+
+# 顶部操作栏（固定在消息历史之前，无需滚动到底部即可操作）
+count = len(st.session_state.messages)
+with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
+    if count:
+        st.caption(f"共 {count} 条消息")
+    if st.button("识别图片链接", icon=":material/link:", help="通过图片 URL 直接识别"):
+        url_recognition_dialog()
+    if st.button("清除聊天", icon=":material/delete:", disabled=not count):
+        st.session_state.messages = []
+        st.rerun()
+
 # 空对话：欢迎页
 if not st.session_state.messages:
     st.space("medium")
@@ -367,43 +401,6 @@ for msg in st.session_state.messages:
             st.image(img, width=220)
         if msg.get("content"):
             st.markdown(msg["content"])
-
-# 输入区操作栏
-count = len(st.session_state.messages)
-with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
-    if count:
-        st.caption(f"共 {count} 条消息")
-    if st.button("清除聊天", icon=":material/delete:", disabled=not count):
-        st.session_state.messages = []
-        st.rerun()
-
-# 图片 URL 识别弹窗（@st.dialog 装饰器模式）
-@st.dialog("通过图片链接识别")
-def url_recognition_dialog():
-    st.caption("粘贴图片 URL，AI 将识别其中的花卉")
-    url_input = st.text_input(
-        "图片链接",
-        placeholder="https://example.com/flower.jpg",
-        label_visibility="collapsed",
-    )
-    col_url1, col_url2 = st.columns(2)
-    with col_url1:
-        if st.button("识别", type="primary", width="stretch"):
-            if url_input:
-                # 先存入 session_state，重跑后统一处理（避免 rerun 丢失识别结果）
-                st.session_state._pending_url_recognition = url_input
-                st.rerun()
-            else:
-                st.warning("请先输入图片链接")
-    with col_url2:
-        if st.button("取消", width="stretch"):
-            st.rerun()
-
-
-# 输入区操作栏：图片 URL 识别入口
-with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
-    if st.button("识别图片链接", icon=":material/link:", help="通过图片 URL 直接识别"):
-        url_recognition_dialog()
 
 # 聊天输入框（支持文字 / 图片 / 语音；生成中按钮变为"停止"）
 chat_input = st.chat_input(
