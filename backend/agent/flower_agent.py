@@ -4,17 +4,13 @@
 基于 LangChain Agent 实现花卉识别和问答功能
 """
 
-import asyncio
 import json
 import logging
-import queue
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
 
 from ..config import settings
@@ -66,29 +62,20 @@ class FlowerAgent:
 
     def _create_agent(self):
         """创建 LangChain Agent（仅用于图片识别 + 多工具场景）"""
-        agent_prompt = ChatPromptTemplate.from_messages([
-            ("system", """你是花卉识别 AI。当用户上传图片时：
-1. 用 flower_recognition 识别花卉
-2. 用 knowledge_search 查询详细信息
-3. 给出完整专业的回答。用中文。"""),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
-
-        agent = create_openai_tools_agent(
-            llm=self.llm,
-            tools=self.tools,
-            prompt=agent_prompt,
+        system_prompt = (
+            "你是花卉识别 AI。当用户上传图片时：\n"
+            "1. 用 flower_recognition 识别花卉\n"
+            "2. 用 knowledge_search 查询详细信息\n"
+            "3. 给出完整专业的回答。用中文。"
         )
 
-        self.agent_executor = AgentExecutor(
-            agent=agent,
+        # langchain 1.x：create_agent 基于 langgraph，
+        # 输入为消息列表，输出为 {"messages": [...]} 状态字典
+        self.agent = create_agent(
+            model=self.llm,
             tools=self.tools,
-            verbose=settings.DEBUG,
-            handle_parsing_errors=True,
-            max_iterations=3,
-            return_intermediate_steps=True,
+            system_prompt=system_prompt,
+            debug=settings.DEBUG,
         )
 
         logger.info("花卉Agent初始化完成")
@@ -122,21 +109,20 @@ class FlowerAgent:
             if image_url:
                 input_message = f"{message}\n\n[图片URL: {image_url}]"
 
-            # 执行 Agent
-            result = self.agent_executor.invoke({
-                "input": input_message,
-                "chat_history": chat_history,
+            # 执行 Agent（langgraph：传入 messages 状态字典）
+            result = self.agent.invoke({
+                "messages": [
+                    *chat_history,
+                    HumanMessage(content=input_message),
+                ],
             })
 
-            # 获取回复
-            response = result.get("output", "")
+            # 获取回复（最后一条消息为最终回答）
+            messages = result.get("messages", [])
+            response = messages[-1].content if messages else ""
 
-            # 获取使用的工具信息
-            tools_used = []
-            for step in result.get("intermediate_steps", []):
-                if len(step) >= 2:
-                    tool_name = step[0].tool if hasattr(step[0], 'tool') else "unknown"
-                    tools_used.append(tool_name)
+            # 获取使用的工具信息（从消息的 tool_calls 提取）
+            tools_used = _extract_tools_used(messages)
 
             # 更新会话历史
             self._update_chat_history(
@@ -194,21 +180,20 @@ class FlowerAgent:
             if image_url:
                 input_message = f"{message}\n\n[图片URL: {image_url}]"
 
-            # 执行 Agent
-            result = await self.agent_executor.ainvoke({
-                "input": input_message,
-                "chat_history": chat_history,
+            # 执行 Agent（langgraph：传入 messages 状态字典）
+            result = await self.agent.ainvoke({
+                "messages": [
+                    *chat_history,
+                    HumanMessage(content=input_message),
+                ],
             })
 
-            # 获取回复
-            response = result.get("output", "")
+            # 获取回复（最后一条消息为最终回答）
+            messages = result.get("messages", [])
+            response = messages[-1].content if messages else ""
 
-            # 获取使用的工具信息
-            tools_used = []
-            for step in result.get("intermediate_steps", []):
-                if len(step) >= 2:
-                    tool_name = step[0].tool if hasattr(step[0], 'tool') else "unknown"
-                    tools_used.append(tool_name)
+            # 获取使用的工具信息（从消息的 tool_calls 提取）
+            tools_used = _extract_tools_used(messages)
 
             # 更新会话历史
             self._update_chat_history(
@@ -464,47 +449,42 @@ class FlowerAgent:
     ):
         """Agent 路径：有图片时用 Agent 协调多个工具。"""
         inputs = {
-            "input": message,
-            "chat_history": chat_history,
+            "messages": [
+                *chat_history,
+                HumanMessage(content=message),
+            ],
         }
 
-        q = queue.Queue()
-        callback = _StreamingCallback(q)
-
-        def run_agent():
-            try:
-                list(self.agent_executor.stream(
-                    inputs,
-                    config={"callbacks": [callback]},
-                ))
-            except Exception as agent_err:
-                q.put(("error", str(agent_err)))
-            finally:
-                q.put(None)
-
-        task = asyncio.ensure_future(asyncio.to_thread(run_agent))
-
+        # langgraph 事件流：工具调用完成前丢弃 LLM token，
+        # 工具执行完毕后的模型输出才是最终回复
+        tool_finished = False
         response_parts = []
-        while not task.done() or not q.empty():
-            try:
-                item = await asyncio.to_thread(q.get, block=True, timeout=0.2)
-            except queue.Empty:
-                continue
-
-            if item is None:
-                break
-
-            kind, payload = item
-            if kind == "token":
-                response_parts.append(payload)
-                yield {"type": "token", "content": payload}
-            elif kind == "tool":
-                yield {"type": "status", "content": f"正在{payload}…"}
-            elif kind == "error":
-                yield {"type": "error", "content": payload}
-                break
-
-        await task
+        try:
+            async for event in self.agent.astream_events(
+                inputs,
+                version="v2",
+                # 替代旧 AgentExecutor 的 max_iterations=3（每个迭代约 4-5 个节点）
+                config={"recursion_limit": 20},
+            ):
+                kind = event["event"]
+                if kind == "on_tool_start":
+                    tool_name = event.get("name", "工具")
+                    yield {
+                        "type": "status",
+                        "content": f"正在{_tool_display_name(tool_name)}…",
+                    }
+                elif kind == "on_tool_end":
+                    tool_finished = True
+                elif kind == "on_chat_model_stream":
+                    chunk = event["data"].get("chunk")
+                    content = getattr(chunk, "content", "") if chunk else ""
+                    if content and tool_finished:
+                        response_parts.append(content)
+                        yield {"type": "token", "content": content}
+        except Exception as e:
+            logger.error(f"Agent 流式异常: {e}")
+            yield {"type": "error", "content": f"处理失败：{e}"}
+            return
 
         response_text = "".join(response_parts)
         if response_text:
@@ -521,37 +501,15 @@ class FlowerAgent:
         }
 
 
-class _StreamingCallback(BaseCallbackHandler):
-    """
-    流式回调处理器（仅用于 Agent 路径）。
-
-    工具调用阶段的 token 丢弃，工具执行后才开始产出最终回复 token。
-    """
-
-    def __init__(self, q: queue.Queue):
-        self._q = q
-        self._tool_finished = False  # 是否至少完成过一次工具
-
-    def on_llm_new_token(self, token: str, **kwargs) -> None:
-        if not token:
-            return
-        # 工具结束后的 token 才是最终回复 → 直接产出
-        if self._tool_finished:
-            self._q.put(("token", token))
-
-    def on_tool_start(self, serialized, input_str, **kwargs) -> None:
-        tool_name = (
-            serialized.get("name", "工具")
-            if isinstance(serialized, dict)
-            else "工具"
-        )
-        self._q.put(("tool", _tool_display_name(tool_name)))
-
-    def on_tool_end(self, output, **kwargs) -> None:
-        self._tool_finished = True
-
-    def on_chain_end(self, outputs, **kwargs) -> None:
-        pass  # sentinel 由 run_agent 负责
+def _extract_tools_used(messages: List) -> List[str]:
+    """从 langgraph 输出消息中提取实际调用的工具名（去重保序）"""
+    tools_used = []
+    for m in messages:
+        for tc in getattr(m, "tool_calls", []) or []:
+            name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+            if name not in tools_used:
+                tools_used.append(name)
+    return tools_used
 
 
 def _tool_display_name(tool_name: str) -> str:
