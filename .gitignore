@@ -43,3 +43,6 @@ faiss_index/
 .claude/
 .agents/
 .playwright-mcp/
+
+# 部署密钥（绝不提交）
+.deploy/
