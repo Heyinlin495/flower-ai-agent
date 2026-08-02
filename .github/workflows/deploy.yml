@@ -1,0 +1,135 @@
+# =============================================================================
+# CD — push 到 main 自动构建镜像并部署到服务器
+#   流程：构建 Docker 镜像 → 推送到 GitHub Container Registry (GHCR)
+#        → SSH 到服务器 → 拉取镜像 → docker compose 重启
+#   服务器需预装：Docker + Docker Compose v2
+# =============================================================================
+name: CD
+
+on:
+  push:
+    branches: [main]
+    paths:                    # 仅代码/配置变化才部署，README 等不触发
+      - 'backend/**'
+      - 'frontend/**'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'requirements.txt'
+  workflow_dispatch:          # 手动触发
+
+env:
+  IMAGE_NAME: flower-ai-agent
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-deploy:
+    name: 构建镜像并部署
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy
+      cancel-in-progress: true
+
+    permissions:              # 最小权限：仅推送 GHCR 需要
+      contents: read
+      packages: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # ── 构建镜像 ────────────────────────────────────────────────────────
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # 同一 tag 复用构建缓存，二次构建快
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 日期 tag（可回滚）+ 滚动 latest
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      # ── 部署到服务器 ────────────────────────────────────────────────────
+      - name: 通过 SSH 部署到服务器
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          port: ${{ secrets.DEPLOY_PORT }}
+          # 幂等：确保目录 → 写入 compose/启动脚本 → 拉取最新镜像 → 重启
+          script: |
+            set -e
+            mkdir -p ~/flower-ai-agent
+            cd ~/flower-ai-agent
+
+            # 写入 compose 文件（服务器不需要源码，只需运行配置）
+            cat > docker-compose.yml <<'EOF'
+            services:
+              backend:
+                image: ghcr.io/${{ github.repository }}/flower-ai-agent:latest
+                env_file: .env
+                environment:
+                  - DEBUG=false
+                ports:
+                  - "8000:8000"
+                volumes:
+                  - flower-data:/app/data
+                  - flower-uploads:/app/uploads
+                  - flower-logs:/app/logs
+                healthcheck:
+                  test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+                  interval: 30s
+                  timeout: 5s
+                  retries: 3
+                  start_period: 30s
+                restart: unless-stopped
+
+              frontend:
+                image: ghcr.io/${{ github.repository }}/flower-ai-agent:latest
+                command: ["python", "run_frontend.py"]
+                env_file: .env
+                environment:
+                  - FLOWER_API_BASE_URL=http://backend:8000
+                ports:
+                  - "8501:8501"
+                depends_on:
+                  backend:
+                    condition: service_healthy
+                restart: unless-stopped
+
+            volumes:
+              flower-data:
+              flower-uploads:
+              flower-logs:
+            EOF
+
+            # 登录 GHCR 拉取镜像
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # 拉取最新镜像并重启（仅变更时重建）
+            docker compose pull
+            docker compose up -d
+
+            # 清理旧镜像（保留最近 2 个版本）
+            docker image prune -af --filter "until=72h"
+
+            # 健康检查（最多等 90 秒）
+            for i in $(seq 1 30); do
+              if curl -sf http://localhost:8000/health > /dev/null; then
+                echo "✅ 后端健康检查通过"
+                break
+              fi
+              echo "⏳ 等待后端启动 ($i/30)..."
+              sleep 3
+            done
+            curl -sf http://localhost:8000/health > /dev/null || { echo "❌ 后端未就绪"; exit 1; }

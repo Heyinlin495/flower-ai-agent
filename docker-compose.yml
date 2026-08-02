@@ -1,0 +1,70 @@
+# =============================================================================
+# 花卉识别 AI Agent — 本地开发 docker-compose
+#   使用方式：
+#     docker compose up --build          # 构建并启动
+#     docker compose down                # 停止并移除容器
+#     docker compose logs -f backend     # 查看后端日志
+#   .env（真实 API Key）通过 env_file 注入容器，不烧入镜像，安全
+# =============================================================================
+
+services:
+  # ── 后端：FastAPI ────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 开发模式：本地代码挂载进容器，改代码即时生效（DEBUG=true 时 uvicorn reload）
+    volumes:
+      - ./backend:/app/backend
+      - ./knowledge:/app/knowledge
+      - ./data:/app/data
+      - ./uploads:/app/uploads
+      - ./logs:/app/logs
+      # 只读挂载启动脚本，避免容器内修改
+      - ./run_backend.py:/app/run_backend.py:ro
+      # 屏蔽容器内安装的包（保持与宿主一致），若需在容器内安装额外包可注释掉
+      - /app/data/chroma_db
+      - /app/uploads/*
+    env_file:
+      - .env
+    environment:
+      - DEBUG=true
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  # ── 前端：Streamlit ──────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # 覆盖容器默认命令，改跑前端
+    command: ["python", "run_frontend.py"]
+    # 开发模式：本地代码热更新
+    volumes:
+      - ./frontend:/app/frontend
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./run_frontend.py:/app/run_frontend.py:ro
+    env_file:
+      - .env
+    environment:
+      - FLOWER_API_BASE_URL=http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped

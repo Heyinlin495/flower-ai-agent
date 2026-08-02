@@ -1,0 +1,44 @@
+# ============================================================
+# Docker 构建上下文排除项
+#   目的：构建快（少传输）+ 安全（密钥/数据不进镜像）
+# ============================================================
+
+# 密钥 —— 绝不进镜像
+.env
+.env.*
+!.env.example
+
+# 运行时数据 / 本地状态
+data/
+uploads/
+logs/
+*.db
+*.sqlite*
+
+# Python 缓存与虚拟环境
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# 开发工具与测试残留
+.claude/
+.agents/
+.playwright-mcp/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 文档与 git
+docs/
+.git/
+.gitignore
+Dockerfile
+docker-compose.yml
+*.md
+*.bat
+
+# 测试
+tests/
+test_*.py

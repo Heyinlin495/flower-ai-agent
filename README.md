@@ -266,6 +266,57 @@ pytest tests/ -v
 
 覆盖健康检查、知识库增删查、聊天发送/流式、会话历史往返等 10 个用例。
 
+## 🐳 Docker 部署
+
+多阶段构建（小镜像 · 快构建 · 非 root 安全运行），本地开发用 compose：
+
+```bash
+# 构建并启动前后端（自动加载 .env 注入 API Key）
+docker compose up --build
+
+# 前端 http://localhost:8501 · 后端 http://localhost:8000
+# 改代码即时生效（代码目录已挂载进容器）
+```
+
+```bash
+# 生产环境：单独构建镜像，仅跑后端
+docker build -t flower-ai-agent .
+docker run -d --env-file .env -p 8000:8000 -v flower-data:/app/data flower-ai-agent
+```
+
+- `.env`（真实 API Key）通过 `env_file` / `--env-file` 注入，**不烧入镜像**
+- 容器以非 root 用户运行，数据写入挂载卷（`data/`、`uploads/`、`logs/`）
+- 前端默认通过 `FLOWER_API_BASE_URL=http://backend:8000` 访问 compose 内的后端
+
+## 🤖 GitHub Actions 自动化
+
+| Workflow | 触发 | 行为 |
+|---|---|---|
+| `ci.yml` | 任意 PR（含 draft） | 语法检查 + pytest（进程内 ASGI） |
+| `deploy.yml` | push 到 `main` | 构建镜像 → 推 GHCR → SSH 部署到服务器 |
+
+**服务器部署流程**：登录 GHCR → 拉取 `ghcr.io/<你的账号>/flower-ai-agent:latest` → 写入 compose 配置 → `docker compose up -d` 重启 → 健康检查。
+
+### 需要配置的 GitHub Secrets
+
+在仓库 **Settings → Secrets and variables → Actions** 添加：
+
+| Secret | 用途 | 必填 |
+|---|---|---|
+| `DASHSCOPE_API_KEY` | CI 测试 / 服务器运行（阿里云百炼） | ✅ |
+| `DASHSCOPE_BASE_URL` | 同上（OpenAI 兼容接口） | ✅ |
+| `DASHSCOPE_ANTHROPIC_URL` | 视觉模型 Anthropic 兼容接口 | ✅ |
+| `OSS_ACCESS_KEY_ID` | OSS 图片存储 | 可选（不配则 base64 模式） |
+| `OSS_ACCESS_KEY_SECRET` | OSS 密钥 | 可选 |
+| `OSS_BUCKET_NAME` | OSS Bucket 名 | 可选 |
+| `OSS_ENDPOINT` | OSS Endpoint | 可选 |
+| `DEPLOY_HOST` | 服务器 IP/域名 | ✅（部署用） |
+| `DEPLOY_USER` | SSH 用户名（如 `ubuntu`） | ✅ |
+| `DEPLOY_SSH_KEY` | SSH 私钥（`-----BEGIN OPENSSH PRIVATE KEY-----` 全文） | ✅ |
+| `DEPLOY_PORT` | SSH 端口（默认 22） | ✅ |
+
+> `GITHUB_TOKEN` 无需配置，Actions 自动提供（用于登录 GHCR）。
+
 ## 🔑 获取 API Key
 
 ### 阿里云百炼大模型平台
