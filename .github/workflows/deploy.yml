@@ -15,6 +15,7 @@ on:
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'requirements.txt'
+      - '.github/workflows/deploy.yml'   # workflow 自身变更也触发（否则改完永远不部署）
   workflow_dispatch:          # 手动触发
 
 env:
@@ -37,6 +38,12 @@ jobs:
       - name: 检出代码
         uses: actions/checkout@v4
 
+      # Docker 镜像名必须全小写；GitHub 用户名可能含大写（如 Heyinlin495）
+      - name: 计算小写仓库名
+        run: |
+          echo "LOWER_REPO=${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "LOWER_OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       # ── 构建镜像 ────────────────────────────────────────────────────────
       - name: 登录 GitHub Container Registry
         uses: docker/login-action@v3
@@ -51,11 +58,11 @@ jobs:
           context: .
           push: true
           # 从 GHCR 已有镜像复用层缓存（push 到 registry 自动带缓存）
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
-          # 日期 tag（可回滚）+ 滚动 latest
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/${{ env.IMAGE_NAME }}:latest
+          # 滚动 latest + sha tag（可回滚）
           tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.LOWER_REPO }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
       # ── 部署到服务器 ────────────────────────────────────────────────────
       - name: 通过 SSH 部署到服务器
@@ -75,7 +82,7 @@ jobs:
             cat > docker-compose.yml <<'EOF'
             services:
               backend:
-                image: ghcr.io/${{ github.repository }}/flower-ai-agent:latest
+                image: ghcr.io/${{ env.LOWER_REPO }}/flower-ai-agent:latest
                 env_file: .env
                 environment:
                   - DEBUG=false
@@ -94,7 +101,7 @@ jobs:
                 restart: unless-stopped
 
               frontend:
-                image: ghcr.io/${{ github.repository }}/flower-ai-agent:latest
+                image: ghcr.io/${{ env.LOWER_REPO }}/flower-ai-agent:latest
                 command: ["python", "run_frontend.py"]
                 env_file: .env
                 environment:
@@ -112,8 +119,8 @@ jobs:
               flower-logs:
             EOF
 
-            # 登录 GHCR 拉取镜像
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # 登录 GHCR 拉取镜像（仓库公开时也可匿名拉取，登录保险起见）
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ env.LOWER_OWNER }} --password-stdin
 
             # 拉取最新镜像并重启（仅变更时重建）
             docker compose pull
