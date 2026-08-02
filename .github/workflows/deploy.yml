@@ -15,6 +15,8 @@ on:
       - 'Dockerfile'
       - 'docker-compose.yml'
       - 'requirements.txt'
+      - 'run_backend.py'
+      - 'run_frontend.py'
       - '.github/workflows/deploy.yml'   # workflow 自身变更也触发（否则改完永远不部署）
   workflow_dispatch:          # 手动触发
 
