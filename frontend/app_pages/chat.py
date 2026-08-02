@@ -327,8 +327,27 @@ def url_recognition_dialog():
             st.rerun()
 
 
-# 顶部操作栏（固定在消息历史之前，无需滚动到底部即可操作）
+# 顶部操作栏（sticky 吸顶：消息多时滚动页面，按钮仍始终可见）
 count = len(st.session_state.messages)
+
+# 注入 CSS：操作栏 sticky 吸顶（消息多时滚动页面，按钮仍固定在顶部）
+# 操作栏位于 stMainBlockContainer 的第一个 stVerticalBlock 内，
+# 其最近滚动祖先 stAppScrollToBottomContainer 滚动时 sticky 生效
+st.markdown(
+    """
+    <style>
+    /* 操作栏 stLayoutWrapper（仅包裹操作栏，40px）吸顶 */
+    [data-testid="stMainBlockContainer"] [data-testid="stLayoutWrapper"]:has([data-testid="stHorizontalBlock"] button) {
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        background: var(--background-color);
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 with st.container(horizontal=True, horizontal_alignment="right", gap="small"):
     if count:
         st.caption(f"共 {count} 条消息")
