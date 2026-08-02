@@ -1,0 +1,30 @@
+[theme]
+base = "light"
+# 蜜桃主色 —— 花卉品牌色
+primaryColor = "#E8836B"
+# 奶油底色
+backgroundColor = "#FFFBF6"
+# 卡片/输入控件底色
+secondaryBackgroundColor = "#FFEFE4"
+# 暖棕文字
+textColor = "#4A3728"
+font = "sans serif"
+
+# 语义色（适配暖色主题，比默认更柔和）
+redColor = "#D95F43"
+orangeColor = "#E89A4A"
+yellowColor = "#D9A836"
+greenColor = "#6F9E5C"
+blueColor = "#5B8FA8"
+violetColor = "#9C7FB0"
+
+# 侧边栏独立配色（比主区略深，形成层次）
+[theme.sidebar]
+backgroundColor = "#FFF3E8"
+secondaryBackgroundColor = "#FFE7D5"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

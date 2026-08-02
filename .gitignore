@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+*.egg-info/
+dist/
+build/
+
+# 环境变量
+.env
+.env.local
+.env.*.local
+
+# 数据目录
+data/
+uploads/
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 向量数据库
+chroma_db/
+faiss_index/
+
+# 临时文件
+*.tmp
+*.log
+
+# 开发工具与测试残留
+.claude/
+.agents/
+.playwright-mcp/
