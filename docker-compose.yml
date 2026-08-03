@@ -29,6 +29,8 @@ services:
       - .env
     environment:
       - DEBUG=true
+      # 本地开发用 reload 热更新，uvicorn 强制单 worker；
+      # 生产部署（.github/workflows/deploy.yml）会覆写 DEBUG=false + APP_WORKERS=2
     ports:
       - "8000:8000"
     healthcheck:

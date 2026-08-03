@@ -95,6 +95,12 @@ class Settings(BaseSettings):
         default="1.1",
         description="应用版本（根路径/健康检查/文档统一使用）"
     )
+    # 后端 worker 进程数：多人同时访问时 >1 不排队（一个等 LLM 回复时别的请求由其他 worker 处理）。
+    # Windows / 调试模式（uvicorn reload）下强制为 1。
+    APP_WORKERS: int = Field(
+        default=2,
+        description="uvicorn worker 进程数（多人并发访问建议 ≥2）"
+    )
     # API Bearer Token 鉴权：非空时所有 /api/* 请求必须带 Authorization: Bearer <token>；
     # 为空则跳过校验（本地开发）。生产环境务必设置，防止公网裸奔被刷额度/删知识库。
     API_TOKEN: str = Field(

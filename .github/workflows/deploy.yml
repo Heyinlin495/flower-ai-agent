@@ -88,6 +88,7 @@ jobs:
                 env_file: .env
                 environment:
                   - DEBUG=false
+                  - APP_WORKERS=2
                 ports:
                   - "8000:8000"
                 volumes:

@@ -30,6 +30,8 @@ def _get_conn() -> sqlite3.Connection:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # 多 worker 多进程并发写时，等待锁而非立刻报 "database is locked"
+        conn.execute("PRAGMA busy_timeout=5000")
         _local.conn = conn
     return conn
 
