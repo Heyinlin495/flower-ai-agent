@@ -17,6 +17,10 @@ except ImportError:
 
 # 后端服务地址（可通过环境变量 FLOWER_API_BASE_URL 覆盖，默认本地开发）
 API_BASE_URL = os.environ.get("FLOWER_API_BASE_URL", "http://localhost:8000")
+# Windows 上 localhost 优先解析 ::1（IPv6），后端只监听 IPv4 时每次连接
+# 都要等超时回退到 127.0.0.1（实测 ~2s），这里统一归一化，所有请求直连 IPv4
+if API_BASE_URL.startswith("http://localhost"):
+    API_BASE_URL = API_BASE_URL.replace("http://localhost", "http://127.0.0.1", 1)
 
 # API 访问令牌（与后端 API_TOKEN 对应，为空则不携带 Authorization 头）
 # 兼容两种变量名：Docker 里用 FLOWER_API_TOKEN 注入，本地直接读 .env 的 API_TOKEN

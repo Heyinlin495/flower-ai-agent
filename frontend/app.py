@@ -43,6 +43,10 @@ st.set_page_config(
 
 MAX_SESSIONS = 20  # 最多保留 20 个历史会话
 
+# 后台预取缓存：{sid: messages}。后台线程拉取、主线程合并进 _sessions，
+# 避免跨线程写 st.session_state（SessionState 非线程安全）。
+_prefetch_cache: dict[str, list] = {}
+
 
 def _make_session_id() -> str:
     """生成唯一会话 ID（时间戳 + 随机后缀，避免同一秒内重复）"""
@@ -62,8 +66,14 @@ if "_pending_images" not in st.session_state:
     st.session_state._pending_images = []  # 输入框上方"待发送"图片预览（由 chat.py 维护）
 
 
-def _save_session():
-    """保存当前消息到会话存储，并自动提取标题"""
+def _save_session(touch: bool = True):
+    """保存当前消息到会话存储，并自动提取标题。
+
+    touch=False 时只保存消息内容、不刷新 ts：切换/新建会话时调用，
+    避免"只是被保存"就让会话跳到列表顶部（用户没在该会话发消息，
+    不该算最新活跃）。只有真正产生新消息（auto-save / 发消息缓存）
+    才刷新 ts，会话才会跳顶。
+    """
     sid = st.session_state.session_id
     msgs = st.session_state.messages
     title = "新会话"
@@ -71,32 +81,50 @@ def _save_session():
         if m["role"] == "user" and not m.get("image_url"):
             title = m["content"][:30]
             break
+    old_ts = st.session_state._sessions.get(sid, {}).get("ts")
     st.session_state._sessions[sid] = {
         "title": title,
         "messages": list(msgs),
-        "ts": datetime.now().isoformat(),
+        "ts": datetime.now().isoformat() if touch else (old_ts or datetime.now().isoformat()),
     }
 
 
 def load_session(sid: str):
-    """切换到指定会话"""
+    """切换到指定会话。
+
+    本地缓存有消息就直接秒开（刚聊过的会话缓存就是最新的），
+    只有缓存为空（刷新后恢复的会话）才同步拉后端，并把结果写回缓存，
+    保证下次切换不再卡在网络请求上。
+    """
     if sid == st.session_state.session_id:
         return
-    # 当前会话有消息才保存（避免空会话产生多余记录）
+    data = st.session_state._sessions.get(sid)
+    if data is None:
+        # 防御：目标会话不存在（可能刚被删除，触发值残留）→ 忽略
+        return
+    # 当前会话有消息才保存（避免空会话产生多余记录）；
+    # touch=False：切换只是保存内容，不刷新 ts，会话顺序不因切换而变
     if st.session_state.messages:
-        _save_session()
-    data = st.session_state._sessions[sid]
+        _save_session(touch=False)
     st.session_state.session_id = sid
-    # 优先从后端拉取该会话历史；拉不到时退回本地缓存
+    cached = list(data.get("messages") or [])
+    if cached:
+        # 本地缓存是最新的：直接秒开，不发网络请求
+        st.session_state.messages = cached
+        return
+    # 缓存为空：从后端拉一次（失败时退回空，避免显示别的会话内容）
     backend_msgs = fetch_backend_history(sid)
-    st.session_state.messages = backend_msgs if backend_msgs else list(data["messages"])
+    st.session_state.messages = list(backend_msgs) if backend_msgs else []
+    if backend_msgs:
+        data["messages"] = list(backend_msgs)
 
 
 def new_session():
     """创建新会话（不保存当前空会话，避免产生多余的"新会话"记录）"""
-    # 当前会话有消息才保存（避免空会话也落盘成一条记录）
+    # 当前会话有消息才保存（避免空会话也落盘成一条记录）；
+    # touch=False：新建只是保存内容，不刷新 ts，旧会话不因"新建"而跳顶
     if st.session_state.messages:
-        _save_session()
+        _save_session(touch=False)
     sid = _make_session_id()
     st.session_state._sessions[sid] = {"title": "新会话", "messages": [], "ts": datetime.now().isoformat()}
     st.session_state.session_id = sid
@@ -122,10 +150,12 @@ def delete_session(sid: str):
     # 全删光时：直接重置当前会话为空，不再 new_session（避免"新建两个"）
     if sid == st.session_state.session_id:
         if sessions:
-            # 有剩余会话：直接切到最新的，但不拉后端历史（用本地缓存，快）
+            # 有剩余会话：直接切到最新的；缓存有消息就秒开，
+            # 缓存为空（刷新恢复的会话）才拉后端，避免删除后显示空聊天
             latest = max(sessions.keys(), key=lambda k: sessions[k]["ts"])
             st.session_state.session_id = latest
-            st.session_state.messages = list(sessions[latest]["messages"])
+            cached = list(sessions[latest].get("messages") or [])
+            st.session_state.messages = cached if cached else fetch_backend_history(latest)
         else:
             # 全删光了：当前会话重置为全新空会话
             st.session_state.session_id = _make_session_id()
@@ -159,18 +189,49 @@ def check_backend_health() -> bool:
 
 
 def fetch_backend_history(session_id: str) -> list:
-    """从后端拉取会话历史（失败返回空列表，短超时避免卡顿）"""
+    """从后端拉取会话历史（失败返回空列表；只在缓存为空时调用，
+    超时放宽到 5s 避免慢网络下丢失历史，不影响正常切换速度）"""
     try:
         resp = requests.get(
             f"{API_BASE_URL}/api/chat/history/{session_id}",
             headers=auth_headers(),
-            timeout=2,
+            timeout=5,
         )
         if resp.status_code == 200:
             return resp.json().get("messages", [])
     except Exception:
         pass
     return []
+
+
+def _prefetch_sessions_async():
+    """首屏后后台预取所有会话历史，填充本地缓存。
+
+    刷新页面后恢复的会话缓存是空的，若不预取，用户第一次点击该会话
+    时要同步等网络（即使已修复 localhost 回退也还有几十毫秒）。
+    这里把拉取放到后台线程，结果存 _prefetch_cache，由主线程在下次
+    rerun 时合并进 _sessions，点击时即缓存命中、秒开。
+    """
+    import threading
+
+    def _do():
+        sids = list(st.session_state._sessions.keys())
+        for sid in sids:
+            if sid in _prefetch_cache:
+                continue
+            msgs = fetch_backend_history(sid)
+            if msgs:
+                _prefetch_cache[sid] = msgs
+
+    threading.Thread(target=_do, daemon=True).start()
+
+
+def _merge_prefetch_cache():
+    """主线程把已完成的预取结果合并进 _sessions（只补空缓存）"""
+    for sid, msgs in list(_prefetch_cache.items()):
+        data = st.session_state._sessions.get(sid)
+        if data is not None and not data.get("messages") and msgs:
+            data["messages"] = list(msgs)
 
 
 def restore_sessions_from_backend():
@@ -262,6 +323,9 @@ with st.sidebar:
     if not st.session_state.get("_sessions_restored"):
         restore_sessions_from_backend()
         st.session_state._sessions_restored = True
+        _prefetch_sessions_async()
+    else:
+        _merge_prefetch_cache()
 
     # ── 品牌区 ────────────────────────────────────────────────────────────
 
