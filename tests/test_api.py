@@ -164,6 +164,35 @@ async def test_recognize_rejects_fake_content_type(client: AsyncClient):
     assert resp.status_code == 400
 
 
+@pytest.mark.anyio
+async def test_recognize_passes_question_to_model(client: AsyncClient, monkeypatch):
+    """图片识别：用户附带的问题应透传给识别工具（图片+问题一起回答）"""
+    import importlib
+    import json as _json
+
+    # backend.api.flower_router 在 __init__.py 被重导出为 APIRouter，必须 importlib 拿真模块
+    flower_router_module = importlib.import_module("backend.api.flower_router")
+
+    captured = {}
+
+    def fake_run(image_url, question=None):
+        captured["question"] = question
+        return _json.dumps({"success": True, "flowers": [], "message": "玫瑰需要充足光照"})
+
+    monkeypatch.setattr(
+        flower_router_module.flower_recognition_tool, "_run", fake_run
+    )
+
+    resp = await client.post(
+        "/api/flower/recognize",
+        files={"image": ("t.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 64, "image/png")},
+        data={"question": "这花怎么养护？"},
+    )
+    assert resp.status_code == 200
+    assert captured["question"] == "这花怎么养护？"
+    assert resp.json()["message"] == "玫瑰需要充足光照"
+
+
 # ── 聊天 ─────────────────────────────────────────────────────────────────
 
 @pytest.mark.anyio

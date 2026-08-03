@@ -44,8 +44,15 @@ _RECOGNITION_PROMPT = """请仔细观察这张图片，识别其中的花卉。
 4. 所有内容请用中文回答"""
 
 
-def _build_recognition_payload(image_url: str) -> dict:
-    """构建 OpenAI 兼容多模态请求体"""
+def _build_recognition_payload(image_url: str, question: Optional[str] = None) -> dict:
+    """构建 OpenAI 兼容多模态请求体（question 非空时附加用户问题，让模型一并回答）"""
+    text = _RECOGNITION_PROMPT
+    if question:
+        text = (
+            f"{text}\n\n用户附加问题：{question}\n"
+            "请识别图片中的花卉并按上述 JSON 格式返回；"
+            "同时请在 message 字段中用中文回答用户的附加问题。"
+        )
     return {
         "model": settings.VISION_MODEL_NAME,
         "max_tokens": 2048,
@@ -59,7 +66,7 @@ def _build_recognition_payload(image_url: str) -> dict:
                     },
                     {
                         "type": "text",
-                        "text": _RECOGNITION_PROMPT,
+                        "text": text,
                     },
                 ],
             }
@@ -120,6 +127,10 @@ class FlowerRecognitionInput(BaseModel):
     image_url: str = Field(
         description="花卉图片的URL地址"
     )
+    question: Optional[str] = Field(
+        default=None,
+        description="用户附带的问题（可选，识别时一并回答）"
+    )
 
 
 class FlowerRecognitionTool(BaseTool):
@@ -139,12 +150,13 @@ class FlowerRecognitionTool(BaseTool):
     """
     args_schema: type = FlowerRecognitionInput
 
-    def _call_vision(self, image_url: str, *, async_client: Optional[httpx.AsyncClient] = None) -> str:
+    def _call_vision(self, image_url: str, question: Optional[str] = None, *, async_client: Optional[httpx.AsyncClient] = None) -> str:
         """
         调用视觉模型识别花卉图片
 
         Args:
             image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+            question: 用户附带的问题（可选）
             async_client: 可选的异步客户端（传入则使用异步调用）
 
         Returns:
@@ -155,7 +167,7 @@ class FlowerRecognitionTool(BaseTool):
             "Content-Type": "application/json",
         }
         api_url = f"{settings.DASHSCOPE_BASE_URL}/chat/completions"
-        payload = _build_recognition_payload(image_url)
+        payload = _build_recognition_payload(image_url, question)
 
         if async_client is not None:
             return self._call_vision_async(async_client, api_url, headers, payload)
@@ -204,30 +216,32 @@ class FlowerRecognitionTool(BaseTool):
             logger.error(error_msg)
             return _build_error_response(error_msg)
 
-    def _run(self, image_url: str) -> str:
+    def _run(self, image_url: str, question: Optional[str] = None) -> str:
         """
         执行花卉识别（同步）
 
         Args:
             image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+            question: 用户附带的问题（可选）
 
         Returns:
             str: 识别结果的JSON字符串
         """
-        return self._call_vision(image_url)
+        return self._call_vision(image_url, question)
 
-    async def _arun(self, image_url: str) -> str:
+    async def _arun(self, image_url: str, question: Optional[str] = None) -> str:
         """
         执行花卉识别（异步，复用连接池）
 
         Args:
             image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+            question: 用户附带的问题（可选）
 
         Returns:
             str: 识别结果的JSON字符串
         """
         async with httpx.AsyncClient(timeout=120.0) as client:
-            return await self._call_vision(image_url, async_client=client)
+            return await self._call_vision(image_url, question, async_client=client)
 
 
 # 创建工具实例

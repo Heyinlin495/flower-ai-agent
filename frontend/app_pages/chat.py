@@ -44,19 +44,22 @@ def _compress_for_display(image_data: bytes, max_edge: int = _DISPLAY_MAX_EDGE) 
 
 
 @st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
-def _upload_image_cached(image_data: bytes) -> dict:
-    """按图片内容缓存识别结果（同图 1 小时内不重复调用视觉模型，省钱）。
+def _upload_image_cached(image_data: bytes, question: str = "") -> dict:
+    """按图片内容 + 附带问题缓存识别结果（同图同问题 1 小时内不重复调用视觉模型）。
 
     max_entries=20：限制缓存条目数，防止大量不同图片把进程内存撑爆。
     """
     files = {"image": ("upload.jpg", image_data, "image/jpeg")}
+    if question:
+        # multipart 文本字段：问题随图片一起发给后端视觉模型
+        files["question"] = (None, question)
     # 直接透传后端结果（success:false 时 error 可能为 None，前端 _render_recognition_result 有兜底）
     return api_post_files("/api/flower/recognize", files=files)
 
 
-def upload_image(image_data: bytes, filename: str) -> dict:
-    """上传图片识别（结果按内容缓存，图片先压成缩略图再上传）"""
-    return _upload_image_cached(_compress_for_display(image_data))
+def upload_image(image_data: bytes, filename: str, question: str = "") -> dict:
+    """上传图片识别（结果按内容+问题缓存，图片先压成缩略图再上传）"""
+    return _upload_image_cached(_compress_for_display(image_data), question or "")
 
 
 def transcribe_audio(audio_bytes: bytes) -> tuple[str, str]:
@@ -147,12 +150,16 @@ def _render_recognition_result(result: dict) -> str:
     if not result.get("success"):
         return f"识别失败：{result.get('error') or '未知错误'}"
     flowers = result.get("flowers", [])
+    message = result.get("message") or ""
     if not flowers:
-        return result.get("message", "识别完成，但未能确定花卉种类")
+        return message or "识别完成，但未能确定花卉种类"
     parts = []
     for i, f in enumerate(flowers, 1):
         header = f"#### 识别结果 {i}" if len(flowers) > 1 else "#### 🌺 识别结果"
         parts.append(f"{header}\n\n{render_flower_card(f)}")
+    if message:
+        # 模型对用户附带问题的回答（如"怎么养护"）
+        parts.append(message)
     parts.append("💡 想了解更多？问我关于这种花的养护知识吧！")
     return "\n\n".join(parts)
 
@@ -213,11 +220,12 @@ def handle_image_recognition_multi(files, user_text: str = ""):
     with st.chat_message("assistant", avatar=":material/eco:"):
         with st.spinner(f"正在识别 {len(uploaded_images)} 张图片…"):
             # 并行识别（单张 5-30s，串行会 N 倍时长；4 并发封顶防打爆连接）
+            # 用户附带的问题（user_text）随每张图一起发给视觉模型回答
             results: list[dict | None] = [None] * len(uploaded_images)
             max_workers = min(len(uploaded_images), 4)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
-                    pool.submit(upload_image, img["data"], img["name"]): i
+                    pool.submit(upload_image, img["data"], img["name"], user_text): i
                     for i, img in enumerate(uploaded_images)
                 }
                 for fut, i in futures.items():

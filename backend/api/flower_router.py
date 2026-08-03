@@ -49,7 +49,8 @@ def _verify_image_format(data: bytes, content_type: str) -> bool:
 @router.post("/recognize")
 async def recognize_flower(
     image: UploadFile = File(...),
-    session_id: Optional[str] = Form(None)
+    session_id: Optional[str] = Form(None),
+    question: Optional[str] = Form(None)
 ):
     """
     识别花卉图片
@@ -59,6 +60,7 @@ async def recognize_flower(
     Args:
         image: 上传的图片文件
         session_id: 会话ID（可选）
+        question: 用户附带的问题（可选，识别时一并回答）
 
     Returns:
         FlowerRecognitionResult: 识别结果
@@ -108,9 +110,9 @@ async def recognize_flower(
         else:
             image_url = oss_result["url"]
 
-        # 调用识别工具（阻塞调用，移出 event loop）
+        # 调用识别工具（阻塞调用，移出 event loop；question 一并交给视觉模型回答）
         recognition_result = await run_in_threadpool(
-            flower_recognition_tool._run, image_url
+            flower_recognition_tool._run, image_url, question
         )
 
         # 解析结果
