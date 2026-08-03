@@ -1,7 +1,8 @@
 # =============================================================================
 # CI — Pull Request 自动测试
 #   触发：任何 PR（含 draft）
-#   内容：语法检查 + pytest（进程内 ASGI，无需启动外部服务）
+#   内容：语法检查 + pytest（进程内 ASGI，全离线：stub Agent + 假 Embedding，
+#         不依赖外部服务与 API Key）
 # =============================================================================
 name: CI
 
@@ -38,15 +39,7 @@ jobs:
         run: |
           python -m compileall -q backend frontend tests
 
-      - name: 运行 pytest
-        env:
-          DASHSCOPE_API_KEY: ${{ secrets.DASHSCOPE_API_KEY }}
-          DASHSCOPE_BASE_URL: ${{ secrets.DASHSCOPE_BASE_URL }}
-          DASHSCOPE_ANTHROPIC_URL: ${{ secrets.DASHSCOPE_ANTHROPIC_URL }}
-          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
-          OSS_BUCKET_NAME: ${{ secrets.OSS_BUCKET_NAME }}
-          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+      - name: 运行 pytest（全离线，无需 API Key）
         run: python -m pytest tests/ -v
 
       - name: 上传 pytest 报告（失败时保留现场）

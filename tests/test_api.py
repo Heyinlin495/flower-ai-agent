@@ -24,6 +24,36 @@ async def test_health(client: AsyncClient):
 
 
 @pytest.mark.anyio
+async def test_api_requires_token_when_configured(client: AsyncClient, monkeypatch):
+    """配置 API_TOKEN 后：/api/* 无 Token → 401，带 Token → 200；/health 不受影响"""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "API_TOKEN", "test-secret")
+
+    # 无 Authorization 头 → 401
+    resp = await client.get("/api/chat/sessions")
+    assert resp.status_code == 401
+
+    # 错误 Token → 401
+    resp = await client.get(
+        "/api/chat/sessions",
+        headers={"Authorization": "Bearer wrong-token"},
+    )
+    assert resp.status_code == 401
+
+    # 正确 Token → 200
+    resp = await client.get(
+        "/api/chat/sessions",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert resp.status_code == 200
+
+    # 健康检查不受鉴权影响（部署探活依赖）
+    resp = await client.get("/health")
+    assert resp.status_code == 200
+
+
+@pytest.mark.anyio
 async def test_root(client: AsyncClient):
     """根路径"""
     resp = await client.get("/")
@@ -107,6 +137,31 @@ async def test_knowledge_add_and_delete(client: AsyncClient):
     # 列表应已移除
     resp = await client.get("/api/flower/knowledge/list")
     assert flower_name not in resp.json()["flowers"]
+
+
+# ── 花卉识别（上传校验） ────────────────────────────────────────────────
+
+@pytest.mark.anyio
+async def test_recognize_rejects_oversized_image(client: AsyncClient):
+    """超大图片应返回 413（大小限制）"""
+    from backend.config import settings
+
+    big_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * (settings.MAX_UPLOAD_SIZE + 1)
+    resp = await client.post(
+        "/api/flower/recognize",
+        files={"image": ("big.png", big_data, "image/png")},
+    )
+    assert resp.status_code == 413
+
+
+@pytest.mark.anyio
+async def test_recognize_rejects_fake_content_type(client: AsyncClient):
+    """声明 image/png 但内容不是图片 → 400（魔数校验）"""
+    resp = await client.post(
+        "/api/flower/recognize",
+        files={"image": ("fake.png", b"this is not an image", "image/png")},
+    )
+    assert resp.status_code == 400
 
 
 # ── 聊天 ─────────────────────────────────────────────────────────────────
