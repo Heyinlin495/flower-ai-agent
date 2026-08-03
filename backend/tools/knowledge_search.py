@@ -95,8 +95,9 @@ class KnowledgeSearchTool(BaseTool):
             }, ensure_ascii=False)
 
     async def _arun(self, query: str, flower_name: Optional[str] = None) -> str:
-        """异步执行（暂时使用同步实现）"""
-        return self._run(query, flower_name)
+        """异步执行（同步实现放到线程池，避免阻塞 event loop）"""
+        import asyncio
+        return await asyncio.to_thread(self._run, query, flower_name)
 
 
 # 创建工具实例

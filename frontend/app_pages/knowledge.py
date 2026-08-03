@@ -5,25 +5,8 @@
 """
 
 import streamlit as st
-import requests
 
-from config import API_BASE_URL
-
-
-def search_knowledge(query: str, flower_name: str = "", top_k: int = 3) -> dict:
-    """搜索知识库"""
-    try:
-        params = {"query": query, "top_k": top_k}
-        if flower_name:
-            params["flower_name"] = flower_name
-        resp = requests.get(f"{API_BASE_URL}/api/flower/knowledge/search", params=params, timeout=30)
-        if resp.status_code == 200:
-            return resp.json()
-        return {"success": False, "error": f"API 错误: {resp.status_code}"}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "无法连接到后端服务"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+from api import api_get
 
 
 # ─ 页面渲染 ─────────────────────────────────────────────────────────────────
@@ -93,7 +76,10 @@ if submitted and query:
 if "_knowledge_query" in st.session_state and st.session_state._knowledge_query:
     search_q = st.session_state._knowledge_query
     with st.spinner("正在搜索知识库…"):
-        result = search_knowledge(search_q, flower_name, top_k)
+        result = api_get(
+            "/api/flower/knowledge/search",
+            params={"query": search_q, "top_k": top_k, **({"flower_name": flower_name} if flower_name else {})},
+        )
 
     if result.get("success"):
         results = result.get("results", [])

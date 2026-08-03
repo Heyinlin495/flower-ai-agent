@@ -52,17 +52,48 @@ class KnowledgeBase:
         # 初始化状态
         self._initialized = False
 
+    def _store_has_content(self) -> bool:
+        """判断向量存储是否已有内容"""
+        try:
+            if self.vector_store._store_type == "chroma":
+                return self.vector_store.store._collection.count() > 0
+            # FAISS：本地索引文件存在即视为已有内容
+            return (settings.DATA_DIR / "faiss_index").exists()
+        except Exception as e:
+            logger.warning(f"检查知识库存量失败: {e}")
+            return False
+
     def initialize(self) -> None:
         """
         初始化知识库
 
-        加载文档、分割、向量化并存储
+        加载文档、分割、向量化并存储。
+        已有索引时跳过全量重建（避免重启重复 embedding 烧钱，
+        也保留前端"知识管理"页面手动添加的知识），
+        设置 KNOWLEDGE_FORCE_REINDEX=true 可强制重建。
         """
         try:
             logger.info("开始初始化知识库...")
 
             # 初始化向量存储
             self.vector_store.initialize()
+
+            # 已有索引 → 跳过全量重建（除非显式强制）
+            if self._store_has_content():
+                if not settings.KNOWLEDGE_FORCE_REINDEX:
+                    logger.info("知识库索引已存在，跳过全量重建（如需重建设置 KNOWLEDGE_FORCE_REINDEX=true）")
+                    self._initialized = True
+                    return
+                logger.info("KNOWLEDGE_FORCE_REINDEX=true，删除旧索引重建")
+                if self.vector_store._store_type == "chroma":
+                    self.vector_store.store.delete_collection()
+                    self.vector_store.initialize()
+                else:
+                    faiss_path = settings.DATA_DIR / "faiss_index"
+                    if faiss_path.exists():
+                        import shutil
+                        shutil.rmtree(faiss_path, ignore_errors=True)
+                    self.vector_store.initialize()
 
             # 加载文档
             knowledge_dir = settings.KNOWLEDGE_DIR / "processed"

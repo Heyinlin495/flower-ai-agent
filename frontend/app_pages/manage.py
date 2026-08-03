@@ -4,60 +4,12 @@
 添加和管理花卉知识库数据
 """
 
-import streamlit as st
-import requests
 import json
 
+import streamlit as st
+
+from api import api_get, api_post, api_delete
 from config import API_BASE_URL
-
-
-def add_flower_knowledge(flower_data: dict) -> dict:
-    """添加花卉知识"""
-    try:
-        resp = requests.post(
-            f"{API_BASE_URL}/api/flower/knowledge/add",
-            json=flower_data,
-            timeout=30,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return {"success": False, "error": f"API 错误: {resp.status_code}"}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "无法连接到后端服务"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def list_flower_knowledge() -> dict:
-    """列出知识库中的花卉"""
-    try:
-        resp = requests.get(
-            f"{API_BASE_URL}/api/flower/knowledge/list",
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return {"success": False, "error": f"API 错误: {resp.status_code}"}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "无法连接到后端服务"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-def delete_flower_knowledge(flower_name: str) -> dict:
-    """删除指定花卉的知识"""
-    try:
-        resp = requests.delete(
-            f"{API_BASE_URL}/api/flower/knowledge/delete/{flower_name}",
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            return resp.json()
-        return {"success": False, "error": f"API 错误: {resp.status_code}"}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "error": "无法连接到后端服务"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 
 # ─ 页面渲染 ────────────────────────────────────────────────────────────────
@@ -131,7 +83,7 @@ with tab_add:
                 }
 
                 with st.spinner("正在添加…"):
-                    result = add_flower_knowledge(flower_data)
+                    result = api_post("/api/flower/knowledge/add", json=flower_data)
 
                 if result.get("success"):
                     st.success(f"**{name}** 已成功添加到知识库！")
@@ -169,7 +121,9 @@ with tab_json:
 
         with st.container(horizontal=True, horizontal_alignment="center", gap="small"):
             if st.button("验证 JSON", icon=":material/check_circle:"):
-                if json_input:
+                if not json_input:
+                    st.warning("请输入 JSON 数据")
+                else:
                     try:
                         data = json.loads(json_input)
                         if "name" not in data:
@@ -178,30 +132,28 @@ with tab_json:
                             st.success(f"JSON 格式正确，花卉名称：{data['name']}")
                     except json.JSONDecodeError as e:
                         st.error(f"JSON 格式错误：{e}")
-                else:
-                    st.warning("请输入 JSON 数据")
 
             if st.button(
                 "导入",
                 icon=":material/upload:",
                 type="primary",
             ):
-                if json_input:
+                if not json_input:
+                    st.warning("请输入 JSON 数据")
+                else:
                     try:
                         data = json.loads(json_input)
                         if "name" not in data:
                             st.error("JSON 缺少必需字段：name")
                         else:
                             with st.spinner("正在导入…"):
-                                result = add_flower_knowledge(data)
+                                result = api_post("/api/flower/knowledge/add", json=data)
                             if result.get("success"):
                                 st.success(f"**{data['name']}** 导入成功！")
                             else:
                                 st.error(f"导入失败：{result.get('error', '未知错误')}")
                     except json.JSONDecodeError as e:
                         st.error(f"JSON 格式错误：{e}")
-                else:
-                    st.warning("请输入 JSON 数据")
 
 # ── 知识库概览 ─────────────────────────────────────────────────────────────
 
@@ -212,7 +164,7 @@ with st.container(border=True):
     st.caption("当前知识库中已有的花卉（点击 ✕ 删除）")
 
     with st.spinner("正在读取知识库…"):
-        list_result = list_flower_knowledge()
+        list_result = api_get("/api/flower/knowledge/list")
 
     if list_result.get("success"):
         flowers = list_result.get("flowers", [])
@@ -229,7 +181,7 @@ with st.container(border=True):
                         help=f"删除「{fname}」",
                     ):
                         with st.spinner(f"正在删除「{fname}」…"):
-                            del_result = delete_flower_knowledge(fname)
+                            del_result = api_delete(f"/api/flower/knowledge/delete/{fname}")
                         if del_result.get("success"):
                             st.success(del_result.get("message", "删除成功"))
                             st.rerun()

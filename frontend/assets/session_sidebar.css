@@ -1,0 +1,116 @@
+/* ═══ 会话历史列表（ChatGPT 风格） ══════════════════════════════════════
+   由 session_sidebar.js 注入到侧边栏，纯自定义元素（非 Streamlit 原生控件） */
+
+#sessionSidebarRoot {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 100%;
+    box-sizing: border-box;
+}
+/* 空态提示 */
+#sessionSidebarRoot .session-empty {
+    padding: 14px 10px;
+    font-size: 13px;
+    color: #999;
+    text-align: center;
+    line-height: 1.6;
+}
+/* CCv2 shadow root 容器撑满侧边栏宽度 */
+#sessionSidebarRoot:host, :host {
+    width: 100%;
+}
+
+/* 单个会话项 */
+#sessionSidebarRoot .session-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    border-radius: 8px;
+    transition: background 0.12s ease;
+    padding-right: 8px;  /* 给删除按钮留位 */
+}
+#sessionSidebarRoot .session-item:hover {
+    background: rgba(128, 128, 128, 0.08);
+}
+/* 当前会话：背景高亮 + 左侧色条 */
+#sessionSidebarRoot .session-item.active {
+    background: rgba(217, 119, 54, 0.14);
+}
+#sessionSidebarRoot .session-item.active::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 7px;
+    bottom: 7px;
+    width: 3px;
+    border-radius: 3px;
+    background: #d97736;
+}
+
+/* 会话标题按钮（点击切换） */
+#sessionSidebarRoot .session-title {
+    flex: 1;
+    min-width: 0;
+    background: transparent;
+    border: none;
+    padding: 7px 10px 7px 12px;
+    font-size: 14px;
+    color: var(--text-color, #4a3728);
+    cursor: pointer;
+    text-align: left;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-radius: 8px;
+    font-family: inherit;
+}
+#sessionSidebarRoot .session-title:hover {
+    background: rgba(128, 128, 128, 0.05);
+}
+#sessionSidebarRoot .session-item.active .session-title {
+    font-weight: 600;
+    color: #b45b2e;
+}
+
+/* 时间徽标（右侧小字） */
+#sessionSidebarRoot .session-ts {
+    font-size: 11px;
+    color: #999;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-right: 4px;
+}
+#sessionSidebarRoot .session-item.active .session-ts {
+    color: #c98a5e;
+}
+
+/* 删除按钮：默认隐藏，hover 显示；当前会话常显 */
+#sessionSidebarRoot .session-del {
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #999;
+    font-size: 12px;
+    line-height: 1;
+    opacity: 0;
+    transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+    flex-shrink: 0;
+    padding: 0;
+}
+#sessionSidebarRoot .session-item:hover .session-del {
+    opacity: 1;
+}
+#sessionSidebarRoot .session-item.active .session-del {
+    opacity: 1;
+}
+#sessionSidebarRoot .session-del:hover {
+    background: rgba(224, 79, 79, 0.14);
+    color: #e04f4f;
+}

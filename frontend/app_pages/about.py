@@ -6,11 +6,13 @@
 
 import streamlit as st
 
+from config import APP_VERSION
+
 
 # 顶部标题
 with st.container(horizontal_alignment="center"):
     st.title("🌐 关于本项目", text_alignment="center")
-    st.caption("花卉识别 AI Agent v1.1 · 作者 何胤霖", text_alignment="center")
+    st.caption(f"花卉识别 AI Agent {APP_VERSION} · 作者 何胤霖", text_alignment="center")
 
 st.space("medium")
 
@@ -84,4 +86,4 @@ with col_right:
 # 底部
 st.space("medium")
 with st.container(horizontal_alignment="center"):
-    st.caption("花卉识别 AI Agent v1.1.0 · 2026 · 作者 何胤霖")
+    st.caption(f"花卉识别 AI Agent {APP_VERSION} · 2026 · 作者 何胤霖")

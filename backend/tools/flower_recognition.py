@@ -15,44 +15,8 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-
-class FlowerRecognitionInput(BaseModel):
-    """花卉识别工具输入"""
-    image_url: str = Field(
-        description="花卉图片的URL地址"
-    )
-
-
-class FlowerRecognitionTool(BaseTool):
-    """
-    花卉识别工具
-
-    功能：调用通义千问视觉模型识别花卉图片
-    返回：花卉名称、科属、特征等信息
-    """
-
-    name: str = "flower_recognition"
-    description: str = """
-    用于识别花卉图片的工具。
-    当用户上传花卉图片时，使用此工具识别花卉。
-    输入应该是图片的URL地址。
-    返回花卉的名称、科属、特征、花期等信息。
-    """
-    args_schema: type = FlowerRecognitionInput
-
-    def _run(self, image_url: str) -> str:
-        """
-        执行花卉识别
-
-        Args:
-            image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
-
-        Returns:
-            str: 识别结果的JSON字符串
-        """
-        try:
-            # 构建提示词
-            prompt = """请仔细观察这张图片，识别其中的花卉。
+# 识别提示词（要求模型返回结构化 JSON）
+_RECOGNITION_PROMPT = """请仔细观察这张图片，识别其中的花卉。
 
 请按照以下JSON格式返回识别结果：
 {
@@ -79,98 +43,191 @@ class FlowerRecognitionTool(BaseTool):
 3. 如果无法确定，请在 message 中说明可能的结果
 4. 所有内容请用中文回答"""
 
-            # 使用 httpx 调用 OpenAI 兼容接口（DashScope）
-            headers = {
-                "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
-                "Content-Type": "application/json",
-            }
 
-            # 根据图片URL类型构建 image_url 字段
-            if image_url.startswith("data:"):
-                # Base64 数据 URL，直接传给 OpenAI 兼容接口
-                image_url_field = image_url
-            else:
-                # 普通 URL，也直接传
-                image_url_field = image_url
-
-            # 构建请求体 - OpenAI 兼容多模态格式
-            payload = {
-                "model": settings.VISION_MODEL_NAME,
-                "max_tokens": 2048,
-                "messages": [
+def _build_recognition_payload(image_url: str) -> dict:
+    """构建 OpenAI 兼容多模态请求体"""
+    return {
+        "model": settings.VISION_MODEL_NAME,
+        "max_tokens": 2048,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_url_field},
-                            },
-                            {
-                                "type": "text",
-                                "text": prompt,
-                            },
-                        ],
-                    }
+                        "type": "image_url",
+                        "image_url": {"url": image_url},
+                    },
+                    {
+                        "type": "text",
+                        "text": _RECOGNITION_PROMPT,
+                    },
                 ],
             }
+        ],
+    }
 
-            # 调用 DashScope OpenAI 兼容端点
-            api_url = f"{settings.DASHSCOPE_BASE_URL}/chat/completions"
-            logger.info(f"调用视觉模型: {api_url}")
+
+def _extract_content(api_response: dict) -> str:
+    """从 OpenAI 兼容响应中提取文本内容"""
+    choices = api_response.get("choices", [])
+    if choices:
+        return choices[0].get("message", {}).get("content", "")
+    return api_response.get("message", "")
+
+
+def _parse_recognition_response(content: str) -> str:
+    """把模型返回文本解析为 JSON 字符串。
+
+    优先匹配 ```json 代码块，再退化为首个 { 到末尾 }（处理无围栏/尾注情况）。
+    """
+    try:
+        # 1) ```json ... ``` 代码块围栏内提取（模型常见输出格式）
+        fence = content.find("```")
+        if fence != -1:
+            start = content.find("{", fence)
+            end = content.find("```", start)
+            if start != -1:
+                candidate = content[start:end].strip() if end != -1 else content[start:].strip()
+                result = json.loads(candidate)
+                return json.dumps(result, ensure_ascii=False)
+        # 2) 兜底：首个 { 到最后一个 }
+        json_start = content.find("{")
+        json_end = content.rfind("}") + 1
+        if json_start != -1 and json_end != -1:
+            result = json.loads(content[json_start:json_end])
+            return json.dumps(result, ensure_ascii=False)
+    except json.JSONDecodeError:
+        pass
+
+    # JSON 解析失败时返回原始文本
+    return json.dumps({
+        "success": True,
+        "flowers": [],
+        "message": content
+    }, ensure_ascii=False)
+
+
+def _build_error_response(error_msg: str) -> str:
+    """构建统一错误响应 JSON"""
+    return json.dumps({
+        "success": False,
+        "error": error_msg
+    }, ensure_ascii=False)
+
+
+class FlowerRecognitionInput(BaseModel):
+    """花卉识别工具输入"""
+    image_url: str = Field(
+        description="花卉图片的URL地址"
+    )
+
+
+class FlowerRecognitionTool(BaseTool):
+    """
+    花卉识别工具
+
+    功能：调用通义千问视觉模型识别花卉图片
+    返回：花卉名称、科属、特征等信息
+    """
+
+    name: str = "flower_recognition"
+    description: str = """
+    用于识别花卉图片的工具。
+    当用户上传花卉图片时，使用此工具识别花卉。
+    输入应该是图片的URL地址。
+    返回花卉的名称、科属、特征、花期等信息。
+    """
+    args_schema: type = FlowerRecognitionInput
+
+    def _call_vision(self, image_url: str, *, async_client: Optional[httpx.AsyncClient] = None) -> str:
+        """
+        调用视觉模型识别花卉图片
+
+        Args:
+            image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+            async_client: 可选的异步客户端（传入则使用异步调用）
+
+        Returns:
+            str: 识别结果的JSON字符串
+        """
+        headers = {
+            "Authorization": f"Bearer {settings.DASHSCOPE_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        api_url = f"{settings.DASHSCOPE_BASE_URL}/chat/completions"
+        payload = _build_recognition_payload(image_url)
+
+        if async_client is not None:
+            return self._call_vision_async(async_client, api_url, headers, payload)
+        return self._call_vision_sync(api_url, headers, payload)
+
+    def _call_vision_sync(self, api_url: str, headers: dict, payload: dict) -> str:
+        """同步调用视觉模型"""
+        try:
+            logger.info(f"调用视觉模型(同步): {api_url}")
             response = httpx.post(
                 api_url,
                 headers=headers,
                 json=payload,
                 timeout=120.0,
             )
-
-            if response.status_code == 200:
-                api_response = response.json()
-                # OpenAI 兼容格式响应
-                choices = api_response.get("choices", [])
-                if choices:
-                    content = choices[0].get("message", {}).get("content", "")
-                else:
-                    content = api_response.get("message", "")
-                logger.info(f"花卉识别成功: {content[:100]}...")
-
-                # 尝试解析JSON
-                try:
-                    # 提取JSON部分
-                    json_start = content.find("{")
-                    json_end = content.rfind("}") + 1
-                    if json_start != -1 and json_end != -1:
-                        json_str = content[json_start:json_end]
-                        result = json.loads(json_str)
-                        return json.dumps(result, ensure_ascii=False)
-                except json.JSONDecodeError:
-                    pass
-
-                # 如果JSON解析失败，返回原始文本
-                return json.dumps({
-                    "success": True,
-                    "flowers": [],
-                    "message": content
-                }, ensure_ascii=False)
-            else:
-                error_msg = f"视觉模型调用失败: {response.status_code} - {response.text}"
-                logger.error(error_msg)
-                return json.dumps({
-                    "success": False,
-                    "error": error_msg
-                }, ensure_ascii=False)
-
+            return self._handle_response(response)
         except Exception as e:
             error_msg = f"花卉识别异常: {str(e)}"
             logger.error(error_msg)
-            return json.dumps({
-                "success": False,
-                "error": error_msg
-            }, ensure_ascii=False)
+            return _build_error_response(error_msg)
+
+    async def _call_vision_async(self, async_client: httpx.AsyncClient, api_url: str, headers: dict, payload: dict) -> str:
+        """异步调用视觉模型"""
+        try:
+            logger.info(f"调用视觉模型(异步): {api_url}")
+            response = await async_client.post(
+                api_url,
+                headers=headers,
+                json=payload,
+            )
+            return self._handle_response(response)
+        except Exception as e:
+            error_msg = f"花卉识别异常: {str(e)}"
+            logger.error(error_msg)
+            return _build_error_response(error_msg)
+
+    def _handle_response(self, response) -> str:
+        """处理视觉模型响应"""
+        if response.status_code == 200:
+            api_response = response.json()
+            content = _extract_content(api_response)
+            logger.info(f"花卉识别成功: {content[:100]}...")
+            return _parse_recognition_response(content)
+        else:
+            error_msg = f"视觉模型调用失败: {response.status_code} - {response.text}"
+            logger.error(error_msg)
+            return _build_error_response(error_msg)
+
+    def _run(self, image_url: str) -> str:
+        """
+        执行花卉识别（同步）
+
+        Args:
+            image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+
+        Returns:
+            str: 识别结果的JSON字符串
+        """
+        return self._call_vision(image_url)
 
     async def _arun(self, image_url: str) -> str:
-        """异步执行（暂时使用同步实现）"""
-        return self._run(image_url)
+        """
+        执行花卉识别（异步，复用连接池）
+
+        Args:
+            image_url: 图片URL (支持 http/https URL 或 data: base64 URL)
+
+        Returns:
+            str: 识别结果的JSON字符串
+        """
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await self._call_vision(image_url, async_client=client)
 
 
 # 创建工具实例

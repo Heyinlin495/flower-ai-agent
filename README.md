@@ -75,11 +75,11 @@ flower-ai-agent/
 │   ├── tools/                 # 工具模块
 │   │   ├── __init__.py
 │   │   ├── flower_recognition.py  # 花卉识别工具
-│   │   ├── knowledge_search.py    # 知识库搜索工具
-│   │   └── oss_image_manager.py   # OSS 图片管理
+│   │   └── knowledge_search.py    # 知识库搜索工具
 │   ├── oss/                   # OSS 模块
 │   │   ├── __init__.py
 │   │   └── oss_manager.py    # OSS 管理器
+│   ├── image_utils.py        # 图片压缩（上传前归一化 JPEG）
 │   ├── models/                # 数据模型
 │   │   ├── __init__.py
 │   │   ├── flower.py         # 花卉模型
@@ -90,11 +90,14 @@ flower-ai-agent/
 │       ├── chat_router.py    # 聊天接口
 │       └── flower_router.py  # 花卉识别接口
 ├── frontend/                  # 前端代码
-│   ├── config.py             # 前端公共配置（API 地址）
+│   ├── config.py             # 前端公共配置（API 地址 / 令牌）
+│   ├── api.py                # 统一 HTTP 封装（错误结构 + Bearer Token）
 │   ├── app.py                # Streamlit 主应用
+│   ├── assets/               # 会话侧边栏 CCv2 组件
 │   └── app_pages/            # 页面：聊天 / 知识搜索 / 知识管理 / 关于
-├── tests/                     # pytest 集成测试
-│   ├── conftest.py           # ASGI 测试客户端
+├── tests/                     # pytest 集成测试（全离线：stub Agent + 假 Embedding）
+│   ├── conftest.py           # ASGI 测试客户端 + 离线环境
+│   ├── fakes.py              # 测试替身
 │   └── test_api.py           # API 测试用例
 ├── knowledge/                 # 知识库
 │   ├── raw/                  # 原始文档

@@ -25,7 +25,6 @@ class DashScopeEmbeddings(Embeddings):
         self,
         model: str = None,
         api_key: str = None,
-        text_type: str = "document"
     ):
         """
         初始化 DashScope Embeddings
@@ -33,11 +32,9 @@ class DashScopeEmbeddings(Embeddings):
         Args:
             model: Embedding 模型名称，默认使用配置中的 EMBEDDING_MODEL_NAME
             api_key: DashScope API Key，默认使用配置中的 DASHSCOPE_API_KEY
-            text_type: 文本类型，"document" 或 "query"
         """
         self.model = model or settings.EMBEDDING_MODEL_NAME
         self.api_key = api_key or settings.DASHSCOPE_API_KEY
-        self.text_type = text_type
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """
@@ -50,23 +47,32 @@ class DashScopeEmbeddings(Embeddings):
             List[List[float]]: 向量列表
         """
         embeddings = []
+        # DashScope TextEmbedding 单次请求最多 25 条，取 10 条一批留余量
+        batch_size = 10
 
-        for i, text in enumerate(texts):
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
             try:
                 resp = TextEmbedding.call(
                     model=self.model,
-                    input=text,
+                    input=batch,
                     api_key=self.api_key,
                     text_type="document"  # 文档类型
                 )
 
                 if resp.status_code == 200:
-                    embeddings.append(resp.output["embeddings"][0]["embedding"])
-                    if (i + 1) % 10 == 0:
-                        logger.debug(f"Embedding 进度: {i + 1}/{len(texts)}")
+                    # 批量结果按 text_index 排序，保证与输入顺序一致
+                    items = sorted(
+                        resp.output["embeddings"],
+                        key=lambda x: x.get("text_index", 0),
+                    )
+                    for item in items:
+                        embeddings.append(item["embedding"])
+                    done = min(start + batch_size, len(texts))
+                    logger.debug(f"Embedding 进度: {done}/{len(texts)}")
                 else:
                     logger.error(
-                        f"Embedding 文档失败 [{i}/{len(texts)}]: "
+                        f"Embedding 文档失败 [{start}:{start + len(batch)}]: "
                         f"status={resp.status_code}, code={resp.code}, message={resp.message}"
                     )
                     raise RuntimeError(
@@ -74,7 +80,7 @@ class DashScopeEmbeddings(Embeddings):
                     )
 
             except Exception as e:
-                logger.error(f"Embedding 文档异常 [{i}/{len(texts)}]: {e}")
+                logger.error(f"Embedding 文档异常 [{start}:{start + len(batch)}]: {e}")
                 raise
 
         logger.info(f"成功 embedding {len(embeddings)} 个文档片段")

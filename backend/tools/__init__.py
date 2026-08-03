@@ -6,10 +6,8 @@
 
 from .flower_recognition import FlowerRecognitionTool
 from .knowledge_search import KnowledgeSearchTool
-from .oss_image_manager import OSSImageManagerTool
 
 __all__ = [
     "FlowerRecognitionTool",
     "KnowledgeSearchTool",
-    "OSSImageManagerTool",
 ]

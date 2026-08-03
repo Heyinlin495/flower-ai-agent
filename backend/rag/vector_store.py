@@ -66,12 +66,16 @@ class VectorStoreManager:
                 )
                 logger.info(f"FAISS 索引加载成功: {faiss_path}")
             else:
-                # 创建空的 FAISS 索引
+                # 创建空的 FAISS 索引（先放占位再删除，避免假文档污染搜索结果）
                 self._store = FAISS.from_texts(
-                    texts=["初始化文档"],
+                    texts=["占位"],
                     embedding=self.embeddings,
-                    metadatas=[{"type": "init"}]
+                    metadatas=[{"type": "init"}],
                 )
+                try:
+                    self._store.delete([self._store.index_to_docstore_id[0]])
+                except Exception:
+                    pass
                 # 保存索引
                 self._store.save_local(str(faiss_path))
                 logger.info(f"FAISS 索引创建成功: {faiss_path}")

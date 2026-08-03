@@ -48,6 +48,8 @@ class ChatRequest(BaseModel):
     聊天请求模型
     """
     message: str = Field(
+        min_length=1,
+        max_length=4000,
         description="用户消息"
     )
     session_id: Optional[str] = Field(
