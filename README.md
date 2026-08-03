@@ -408,7 +408,11 @@ A: 检查 DASHSCOPE_API_KEY 是否正确配置
 
 ### Q: 语音识别失败
 
-A: 检查 DASHSCOPE_API_KEY 是否正确配置（与图片识别共用同一 Key）
+A: 按部署环境排查：
+
+1. **本地能用、部署到服务器后用不了（最常见）**：浏览器录音（`getUserMedia`）只在**安全上下文**可用，即 `https://` 或 `http://localhost`。直接访问 `http://服务器IP:8501` 时麦克风权限不可用，录音按钮点了没反应。**必须给站点配 HTTPS**（Caddy / Nginx + certbot / Cloudflare 均可），反代时记得保留 WebSocket 升级头（Streamlit SSE 依赖）。
+2. **换浏览器 / 手机后失败**：浏览器录音格式因浏览器而异（Chrome/Firefox/Edge=webm/opus，Safari=mp4/aac），前端会把真实格式上报后端，后端用 ffmpeg 统一转 16k 单声道 wav 再识别。**服务器 Docker 镜像需安装 ffmpeg**（见 Dockerfile），否则退回按原格式直送（Paraformer 也支持部分压缩格式）。
+3. 检查 DASHSCOPE_API_KEY 是否正确配置（与图片识别共用同一 Key）。
 
 ### Q: OSS 上传失败
 

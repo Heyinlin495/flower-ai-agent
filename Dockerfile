@@ -49,6 +49,12 @@ COPY frontend/ ./frontend/
 COPY knowledge/ ./knowledge/
 COPY run_backend.py run_frontend.py ./
 
+# ffmpeg：语音识别转码依赖（浏览器录音 webm/mp4 → 16k 单声道 wav），
+# 不装时后端退回按原格式直送 Paraformer（部分压缩格式也支持）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── 非 root 运行（安全）─────────────────────────────────────────────────────
 RUN useradd --create-home --uid 1000 appuser \
     && mkdir -p /app/data /app/uploads /app/logs \

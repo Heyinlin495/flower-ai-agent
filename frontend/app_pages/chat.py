@@ -13,11 +13,36 @@ import io
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 
 from config import API_BASE_URL
 from api import api_post, api_post_files
 
 logger = logging.getLogger(__name__)
+
+
+def _cache_current_session():
+    """消息变化后立即同步本地会话缓存（侧边栏标题/消息即时更新）。
+
+    发消息的 st.rerun() 会中止脚本，app.py 底部的自动保存要等下
+    一个 run 才执行；这里在 rerun 前先把缓存落好，保证侧边栏不
+    滞后，且切换会话时 load_session 的"缓存优先"路径拿到最新消息。
+    """
+    sid = st.session_state.session_id
+    sessions = st.session_state.get("_sessions")
+    if not sessions or sid not in sessions:
+        return
+    msgs = st.session_state.messages
+    title = "新会话"
+    for m in msgs:
+        if m["role"] == "user" and not m.get("image_url"):
+            title = m["content"][:30]
+            break
+    sessions[sid] = {
+        "title": title,
+        "messages": list(msgs),
+        "ts": datetime.now().isoformat(),
+    }
 
 # 消息内展示/缓存的缩略图最长边（原始大图只存在后端 OSS，前端不存原图）
 _DISPLAY_MAX_EDGE = 900
@@ -59,17 +84,26 @@ def upload_image(image_data: bytes, filename: str) -> dict:
     return _upload_image_cached(_compress_for_display(image_data))
 
 
-def transcribe_audio(audio_bytes: bytes) -> tuple[str, str]:
-    """把录音 WAV 转文字（后端 DashScope Paraformer，前端不持 API Key）。
+def transcribe_audio(audio_file) -> tuple[str, str]:
+    """把录音转文字（后端 DashScope Paraformer，前端不持 API Key）。
+
+    录音的真实格式由浏览器决定（Chrome/Firefox/Edge=webm/opus，
+    Safari=mp4/aac），不能想当然当 wav 送后端——这里从 MIME 推断
+    真实格式上报，由后端统一 ffmpeg 转 wav 再识别。
 
     Returns:
         (transcript, error): transcript 为识别文本（失败为空串），
         error 为失败原因（成功为空串）。
     """
+    audio_bytes = audio_file.getvalue()
+    mime = getattr(audio_file, "type", "") or ""
+    fmt = mime.split("/")[-1] if mime.startswith("audio/") else "wav"
+    fmt = "mp3" if fmt == "mpeg" else fmt
     audio_b64 = base64.b64encode(audio_bytes).decode("utf-8")
     result = api_post(
         "/api/chat/transcribe",
-        json={"audio": audio_b64, "format": "wav", "sample_rate": 16000},
+        # sample_rate=0 表示后端自动（wav 读头部，非 wav 由 ffmpeg 统一转 16k）
+        json={"audio": audio_b64, "format": fmt, "sample_rate": 0},
         timeout=60,
     )
     if result.get("success"):
@@ -249,6 +283,7 @@ def handle_image_recognition_multi(files, user_text: str = ""):
     # 图片附带的问题：识别完成后交给文字 LLM 流式回答
     if user_text:
         _ask_followup_question(results, user_text)
+    _cache_current_session()
 
 
 def _ask_followup_question(results: list[dict | None], user_text: str):
@@ -276,6 +311,7 @@ def handle_text_chat(user_message: str):
         response = st.write_stream(stream_chat_generator(user_message))
 
     st.session_state.messages.append({"role": "assistant", "content": response})
+    _cache_current_session()
 
 
 # ── 初始化 ──────────────────────────────────────────────────────────────────
@@ -384,7 +420,7 @@ if chat_input:
     # 语音识别：成功直接发送（streamlit widget key 不能回填，且符合主流 App 松手即发）
     if audio_file:
         with st.spinner("正在识别语音…"):
-            transcript, err = transcribe_audio(audio_file.getvalue())
+            transcript, err = transcribe_audio(audio_file)
         if transcript:
             handle_text_chat(transcript)
             st.rerun()

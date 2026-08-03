@@ -76,8 +76,8 @@ async def persist_messages(request: PersistMessagesRequest):
 class TranscribeRequest(BaseModel):
     """语音识别请求"""
     audio: str = Field(description="音频数据（base64 编码）")
-    format: str = Field(default="wav", description="音频格式")
-    sample_rate: int = Field(default=16000, description="采样率")
+    format: str = Field(default="wav", description="音频格式（前端上报浏览器录音真实格式，如 webm/mp4/mp3）")
+    sample_rate: int = Field(default=0, description="采样率（0=自动：wav 读头部，非 wav 由 ffmpeg 统一转 16k）")
 
 
 class TranscribeResponse(BaseModel):
@@ -85,6 +85,57 @@ class TranscribeResponse(BaseModel):
     success: bool
     text: str = Field(default="", description="识别文本")
     error: str = Field(default="", description="失败原因（成功时为空）")
+
+
+def _detect_wav_sample_rate(audio_bytes: bytes) -> int:
+    """从 wav 头部读真实采样率（wav 文件自带，Paraformer 不需要前端猜）"""
+    try:
+        import io
+        import wave
+
+        with wave.open(io.BytesIO(audio_bytes)) as w:
+            return w.getframerate()
+    except Exception:
+        return 16000
+
+
+def _convert_to_wav(audio_bytes: bytes) -> bytes | None:
+    """用 ffmpeg 把非 wav 音频转成 16k 单声道 wav。
+
+    浏览器录音格式各异（Chrome/Firefox/Edge=webm/opus，Safari=mp4/aac），
+    Paraformer 对 wav 支持最稳，统一转码最保险。
+    服务器没装 ffmpeg 时返回 None，调用方退回按原格式直接送识别。
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("ffmpeg"):
+        return None
+    in_path = None
+    out_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".audio", delete=False) as f:
+            f.write(audio_bytes)
+            in_path = f.name
+        out_path = f"{in_path}.wav"
+        # ffmpeg 自动探测输入格式；16k 单声道是 Paraformer 的推荐输入
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", in_path, "-ar", "16000", "-ac", "1", out_path],
+            capture_output=True,
+            timeout=30,
+            check=True,
+        )
+        return Path(out_path).read_bytes()
+    except Exception as e:
+        logger.warning(f"ffmpeg 转 wav 失败，退回原格式: {e}")
+        return None
+    finally:
+        for p in (in_path, out_path):
+            if p:
+                try:
+                    Path(p).unlink()
+                except OSError:
+                    pass
 
 
 def _transcribe_sync(audio_b64: str, audio_format: str, sample_rate: int) -> dict:
@@ -96,7 +147,21 @@ def _transcribe_sync(audio_b64: str, audio_format: str, sample_rate: int) -> dic
         from dashscope.audio.asr.recognition import RecognitionCallback
 
         audio_bytes = base64.b64decode(audio_b64)
-        with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as f:
+        fmt = (audio_format or "wav").lower().lstrip(".")
+
+        # 非 wav（浏览器录音几乎都不是）：优先 ffmpeg 统一转 wav，
+        # 没有 ffmpeg 时按原格式送（Paraformer 也支持部分压缩格式）
+        if fmt != "wav":
+            converted = _convert_to_wav(audio_bytes)
+            if converted:
+                audio_bytes = converted
+                fmt = "wav"
+
+        # 采样率：0=自动。wav 读头部真实值；非 wav（未转码）用上报值兜底
+        if sample_rate <= 0:
+            sample_rate = _detect_wav_sample_rate(audio_bytes) if fmt == "wav" else 16000
+
+        with tempfile.NamedTemporaryFile(suffix=f".{fmt}", delete=False) as f:
             f.write(audio_bytes)
             tmp_path = f.name
         try:
@@ -104,7 +169,7 @@ def _transcribe_sync(audio_b64: str, audio_format: str, sample_rate: int) -> dic
             # 离线文件识别用空 callback 即可（call() 处理完整文件后一次性返回）
             rec = Recognition(
                 model="paraformer-realtime-v2",
-                format=audio_format,
+                format=fmt,
                 sample_rate=sample_rate,
                 callback=RecognitionCallback(),
                 api_key=settings.DASHSCOPE_API_KEY,
