@@ -44,22 +44,19 @@ def _compress_for_display(image_data: bytes, max_edge: int = _DISPLAY_MAX_EDGE) 
 
 
 @st.cache_data(ttl=3600, max_entries=20, show_spinner=False)
-def _upload_image_cached(image_data: bytes, question: str = "") -> dict:
-    """按图片内容 + 附带问题缓存识别结果（同图同问题 1 小时内不重复调用视觉模型）。
+def _upload_image_cached(image_data: bytes) -> dict:
+    """按图片内容缓存识别结果（同图 1 小时内不重复调用视觉模型，省钱）。
 
     max_entries=20：限制缓存条目数，防止大量不同图片把进程内存撑爆。
     """
     files = {"image": ("upload.jpg", image_data, "image/jpeg")}
-    if question:
-        # multipart 文本字段：问题随图片一起发给后端视觉模型
-        files["question"] = (None, question)
     # 直接透传后端结果（success:false 时 error 可能为 None，前端 _render_recognition_result 有兜底）
     return api_post_files("/api/flower/recognize", files=files)
 
 
-def upload_image(image_data: bytes, filename: str, question: str = "") -> dict:
-    """上传图片识别（结果按内容+问题缓存，图片先压成缩略图再上传）"""
-    return _upload_image_cached(_compress_for_display(image_data), question or "")
+def upload_image(image_data: bytes, filename: str) -> dict:
+    """上传图片识别（结果按内容缓存，图片先压成缩略图再上传）"""
+    return _upload_image_cached(_compress_for_display(image_data))
 
 
 def transcribe_audio(audio_bytes: bytes) -> tuple[str, str]:
@@ -184,6 +181,10 @@ def _persist_messages_to_backend(messages: list[dict]):
 def handle_image_recognition_multi(files, user_text: str = ""):
     """处理多张图片识别（并行识别每张，总耗时 ≈ 单张）。
 
+    图片附带的问题（user_text）不在视觉模型里回答（视觉模型只做结构化识别，
+    让它同时输出"识别说明+回答"它默认只会给识别说明），识别完成后
+    交给文字 LLM 流式回答，见末尾 _ask_followup_question。
+
     files 兼容两种输入：
     - UploadedFile 对象（输入框 📎 旧调用）
     - (name, bytes) 元组（"+"菜单 JS 文件选择器回传的 base64 解码结果）
@@ -220,12 +221,11 @@ def handle_image_recognition_multi(files, user_text: str = ""):
     with st.chat_message("assistant", avatar=":material/eco:"):
         with st.spinner(f"正在识别 {len(uploaded_images)} 张图片…"):
             # 并行识别（单张 5-30s，串行会 N 倍时长；4 并发封顶防打爆连接）
-            # 用户附带的问题（user_text）随每张图一起发给视觉模型回答
             results: list[dict | None] = [None] * len(uploaded_images)
             max_workers = min(len(uploaded_images), 4)
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
-                    pool.submit(upload_image, img["data"], img["name"], user_text): i
+                    pool.submit(upload_image, img["data"], img["name"]): i
                     for i, img in enumerate(uploaded_images)
                 }
                 for fut, i in futures.items():
@@ -245,6 +245,25 @@ def handle_image_recognition_multi(files, user_text: str = ""):
         {"role": "user", "content": user_content, "image_url": uploaded_images[0]["display"]},
         {"role": "assistant", "content": response},
     ])
+
+    # 图片附带的问题：识别完成后交给文字 LLM 流式回答
+    if user_text:
+        _ask_followup_question(results, user_text)
+
+
+def _ask_followup_question(results: list[dict | None], user_text: str):
+    """把识别结果摘要 + 用户问题交给文字 LLM（qwen-plus）流式回答。
+
+    视觉模型负责结构化识别，问答是文字模型强项；两者分离后
+    图片下附带的问题（"怎么养护"等）才能得到真正回答。
+    """
+    all_names = []
+    for r in results:
+        if r and r.get("success"):
+            all_names.extend(f.get("name", "") for f in r.get("flowers", []))
+    names_str = "、".join(n for n in all_names if n) or "多种花卉"
+    followup = f"我上传了一张花卉图片，识别结果是：{names_str}。请针对我的问题回答：{user_text}"
+    handle_text_chat(followup)
 
 
 def handle_text_chat(user_message: str):
