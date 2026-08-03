@@ -4,9 +4,10 @@
 基于 LangChain Agent 实现花卉识别和问答功能
 """
 
-import json
+import asyncio
 import logging
-from typing import List, Optional, Dict, Any
+from collections import OrderedDict
+from typing import List, Optional
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
@@ -16,11 +17,15 @@ from langchain_openai import ChatOpenAI
 from ..config import settings
 from ..tools.flower_recognition import flower_recognition_tool
 from ..tools.knowledge_search import knowledge_search_tool
-from ..tools.oss_image_manager import oss_image_manager_tool
 from ..rag.knowledge_base import knowledge_base
 from .session_store import session_store
 
 logger = logging.getLogger(__name__)
+
+# 内存中最多保留的会话数（LRU 淘汰，超限的会话从内存移除，SQLite 仍可恢复）
+MAX_SESSIONS_IN_MEMORY = 100
+# 直连 LLM 路径的知识库检索结果缓存上限（热点问题不重复调 embedding）
+KB_SEARCH_CACHE_MAX = 50
 
 
 class FlowerAgent:
@@ -44,11 +49,11 @@ class FlowerAgent:
             streaming=True
         )
 
-        # 工具列表
+        # 工具列表（oss_image_manager 已移除：前端识别走 /api/flower/recognize，
+        # LLM 不会主动保存图片，保留只会诱导模型向 Agent 上下文塞 base64 大字符串）
         self.tools = [
             flower_recognition_tool,
             knowledge_search_tool,
-            oss_image_manager_tool,
         ]
 
         # 系统提示词（精简版，减少 LLM 处理时间）
@@ -57,8 +62,12 @@ class FlowerAgent:
         # 创建 Agent（仅用于图片识别场景）
         self._create_agent()
 
-        # 会话历史存储
-        self._sessions: Dict[str, List] = {}
+        # 会话历史存储（OrderedDict 做 LRU，超过上限自动淘汰最久未访问的会话）
+        self._sessions: "OrderedDict[str, List]" = OrderedDict()
+        # 每会话一个 asyncio.Lock：同会话并发请求串行化，防止历史双写串台
+        self._session_locks: dict = {}
+        # 知识库检索结果 LRU 缓存（直连 LLM 路径用，避免热点问题反复调 embedding）
+        self._kb_search_cache: "OrderedDict[str, list]" = OrderedDict()
 
     def _create_agent(self):
         """创建 LangChain Agent（仅用于图片识别 + 多工具场景）"""
@@ -79,77 +88,6 @@ class FlowerAgent:
         )
 
         logger.info("花卉Agent初始化完成")
-
-    def chat(
-        self,
-        message: str,
-        session_id: Optional[str] = None,
-        image_url: Optional[str] = None
-    ) -> dict:
-        """
-        与用户对话
-
-        Args:
-            message: 用户消息
-            session_id: 会话ID
-            image_url: 图片URL（如果有）
-
-        Returns:
-            dict: 包含回复消息和元数据的字典
-        """
-        try:
-            # 获取或创建会话历史
-            if session_id is None:
-                session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-            chat_history = self._get_chat_history(session_id)
-
-            # 构建输入
-            input_message = message
-            if image_url:
-                input_message = f"{message}\n\n[图片URL: {image_url}]"
-
-            # 执行 Agent（langgraph：传入 messages 状态字典）
-            result = self.agent.invoke({
-                "messages": [
-                    *chat_history,
-                    HumanMessage(content=input_message),
-                ],
-            })
-
-            # 获取回复（最后一条消息为最终回答）
-            messages = result.get("messages", [])
-            response = messages[-1].content if messages else ""
-
-            # 获取使用的工具信息（从消息的 tool_calls 提取）
-            tools_used = _extract_tools_used(messages)
-
-            # 更新会话历史
-            self._update_chat_history(
-                session_id,
-                HumanMessage(content=input_message),
-                AIMessage(content=response)
-            )
-
-            # 构建响应
-            return {
-                "success": True,
-                "message": response,
-                "session_id": session_id,
-                "image_url": image_url,
-                "tools_used": tools_used,
-                "timestamp": datetime.now().isoformat()
-            }
-
-        except Exception as e:
-            error_msg = f"Agent 处理异常: {str(e)}"
-            logger.error(error_msg)
-            return {
-                "success": False,
-                "error": error_msg,
-                "session_id": session_id,
-                "timestamp": datetime.now().isoformat()
-            }
 
     async def achat(
         self,
@@ -173,43 +111,42 @@ class FlowerAgent:
             if session_id is None:
                 session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-            chat_history = self._get_chat_history(session_id)
+            # 同会话并发请求串行化（防历史双写串台）
+            async with self._get_session_lock(session_id):
+                chat_history = self._get_chat_history(session_id)
 
-            # 构建输入
-            input_message = message
-            if image_url:
-                input_message = f"{message}\n\n[图片URL: {image_url}]"
+                # 构建输入
+                input_message = message
+                if image_url:
+                    input_message = f"{message}\n\n[图片URL: {image_url}]"
 
-            # 执行 Agent（langgraph：传入 messages 状态字典）
-            result = await self.agent.ainvoke({
-                "messages": [
-                    *chat_history,
-                    HumanMessage(content=input_message),
-                ],
-            })
+                # 执行 Agent（langgraph：传入 messages 状态字典）
+                result = await self.agent.ainvoke({
+                    "messages": [
+                        *chat_history,
+                        HumanMessage(content=input_message),
+                    ],
+                })
 
-            # 获取回复（最后一条消息为最终回答）
-            messages = result.get("messages", [])
-            response = messages[-1].content if messages else ""
+                # 获取回复（最后一条消息为最终回答）
+                messages = result.get("messages", [])
+                response = messages[-1].content if messages else ""
 
-            # 获取使用的工具信息（从消息的 tool_calls 提取）
-            tools_used = _extract_tools_used(messages)
+                # 获取使用的工具信息（从消息的 tool_calls 提取）
+                tools_used = _extract_tools_used(messages)
 
-            # 更新会话历史
-            self._update_chat_history(
-                session_id,
-                HumanMessage(content=input_message),
-                AIMessage(content=response)
-            )
+                # 更新会话历史（用户消息先记录，AI 回复后记录）
+                self._record_user_message(session_id, input_message)
+                self._update_chat_history(session_id, AIMessage(content=response))
 
-            return {
-                "success": True,
-                "message": response,
-                "session_id": session_id,
-                "image_url": image_url,
-                "tools_used": tools_used,
-                "timestamp": datetime.now().isoformat()
-            }
+                return {
+                    "success": True,
+                    "message": response,
+                    "session_id": session_id,
+                    "image_url": image_url,
+                    "tools_used": tools_used,
+                    "timestamp": datetime.now().isoformat()
+                }
 
         except Exception as e:
             error_msg = f"Agent 异步处理异常: {str(e)}"
@@ -220,6 +157,24 @@ class FlowerAgent:
                 "session_id": session_id,
                 "timestamp": datetime.now().isoformat()
             }
+
+    def _trim_sessions(self):
+        """LRU 淘汰：内存会话超过上限时移除最久未访问的"""
+        while len(self._sessions) > MAX_SESSIONS_IN_MEMORY:
+            oldest_sid, _ = next(iter(self._sessions.items()))
+            del self._sessions[oldest_sid]
+
+    def _get_session_lock(self, session_id: str) -> asyncio.Lock:
+        """获取会话级锁（惰性创建；超限时清理不属于内存会话的旧锁）"""
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+            # 锁表膨胀时清掉已不在内存会话集合里的锁（防 session_id 注入式增长）
+            if len(self._session_locks) > MAX_SESSIONS_IN_MEMORY * 2:
+                for sid in [s for s in self._session_locks if s not in self._sessions]:
+                    self._session_locks.pop(sid, None)
+        return lock
 
     def _get_chat_history(self, session_id: str) -> List:
         """获取会话历史（内存缓存优先，SQLite 落盘兜底恢复）"""
@@ -234,29 +189,50 @@ class FlowerAgent:
                     restored.append(AIMessage(content=m["content"]))
             # 保留最近 20 条
             self._sessions[session_id] = restored[-20:]
+        # LRU：标记为最近访问
+        self._sessions.move_to_end(session_id)
+        self._trim_sessions()
         return self._sessions[session_id]
 
-    def _update_chat_history(
-        self,
-        session_id: str,
-        human_message: HumanMessage,
-        ai_message: AIMessage
-    ):
-        """更新会话历史（内存 + SQLite 双写）"""
+    def _record_user_message(self, session_id: str, message: str):
+        """记录用户消息（内存 + SQLite），AI 回复失败时也不丢失"""
         if session_id not in self._sessions:
             self._sessions[session_id] = []
 
-        self._sessions[session_id].extend([human_message, ai_message])
+        human = HumanMessage(content=message)
+        self._sessions[session_id].append(human)
 
         # 限制历史长度，保留最近的20条消息
         if len(self._sessions[session_id]) > 20:
             self._sessions[session_id] = self._sessions[session_id][-20:]
 
+        # LRU：标记为最近访问
+        self._sessions.move_to_end(session_id)
+        self._trim_sessions()
+
+        # 落盘持久化
+        try:
+            session_store.add_message(session_id, "user", message)
+        except Exception as e:
+            logger.warning(f"会话落盘失败: {e}")
+
+    def _update_chat_history(self, session_id: str, ai_message: AIMessage):
+        """记录 AI 回复（内存 + SQLite 双写），限制最近 20 条"""
+        if session_id not in self._sessions:
+            self._sessions[session_id] = []
+
+        self._sessions[session_id].append(ai_message)
+
+        # 限制历史长度，保留最近的20条消息
+        if len(self._sessions[session_id]) > 20:
+            self._sessions[session_id] = self._sessions[session_id][-20:]
+
+        # LRU：标记为最近访问
+        self._sessions.move_to_end(session_id)
+        self._trim_sessions()
+
         # 落盘持久化（消息内容为字符串时直接存储）
         try:
-            session_store.add_message(
-                session_id, "user", str(human_message.content)
-            )
             session_store.add_message(
                 session_id, "assistant", str(ai_message.content)
             )
@@ -299,9 +275,11 @@ class FlowerAgent:
             stored = []
 
         if stored:
+            # 只回最近 50 条（长会话避免全量拉取）；image_url 一并返回，
+            # 前端恢复历史时图片消息才能正常展示
             return [
-                {"role": m["role"], "content": m["content"]}
-                for m in stored
+                {"role": m["role"], "content": m["content"], "image_url": m.get("image_url")}
+                for m in stored[-50:]
             ]
 
         # 落盘无数据时回退内存
@@ -345,12 +323,19 @@ class FlowerAgent:
         if session_id is None:
             session_id = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
+        # 同会话并发请求串行化（流式期间也持锁，历史不串写；
+        # 前端已用 submit_mode="stop" 限制单条，这里兜底双端并发）
+        lock = self._get_session_lock(session_id)
+        await lock.acquire()
         try:
             chat_history = self._get_chat_history(session_id)
 
             input_message = message
             if image_url:
                 input_message = f"{message}\n\n[图片URL: {image_url}]"
+
+            # 先记录用户消息（即使 AI 回复失败/断流，历史也不丢）
+            self._record_user_message(session_id, input_message)
 
             # ── 快速路径：纯文字 → 直接 LLM（跳过 Agent 循环） ──────────────
             if not image_url:
@@ -373,6 +358,8 @@ class FlowerAgent:
         except Exception as e:
             logger.error(f"流式异常: {e}")
             yield {"type": "error", "content": f"处理失败：{e}"}
+        finally:
+            lock.release()
 
     async def _stream_direct_llm(
         self,
@@ -386,14 +373,23 @@ class FlowerAgent:
         跳过 Agent 循环，节省一次 LLM 调用（~1-2 秒）。
         先快速搜索知识库，把相关内容注入 prompt。
         """
-        # 预加载知识库内容
+        # 预加载知识库内容（同步 embedding 调用放到线程池，避免阻塞 event loop）
+        # 热点问题走 LRU 缓存，不重复调 embedding（省时省钱）
         kb_context = ""
         try:
-            results = knowledge_base.search(query=message, top_k=2)
+            cached = self._kb_search_cache.get(message)
+            if cached is not None:
+                self._kb_search_cache.move_to_end(message)
+                results = cached
+            else:
+                results = await asyncio.to_thread(knowledge_base.search, message, 2)
+                if results:
+                    self._kb_search_cache[message] = results
+                    self._kb_search_cache.move_to_end(message)
+                    while len(self._kb_search_cache) > KB_SEARCH_CACHE_MAX:
+                        self._kb_search_cache.popitem(last=False)
             if results:
-                kb_parts = []
-                for r in results:
-                    kb_parts.append(r["content"][:600])
+                kb_parts = [r["content"][:600] for r in results]
                 kb_context = "\n\n".join(kb_parts)
         except Exception:
             pass  # 知识库不可用时不影响对话
@@ -429,11 +425,7 @@ class FlowerAgent:
 
         response_text = "".join(response_parts)
         if response_text:
-            self._update_chat_history(
-                session_id,
-                HumanMessage(content=message),
-                AIMessage(content=response_text),
-            )
+            self._update_chat_history(session_id, AIMessage(content=response_text))
 
         yield {
             "type": "done",
@@ -455,9 +447,11 @@ class FlowerAgent:
             ],
         }
 
-        # langgraph 事件流：工具调用完成前丢弃 LLM token，
-        # 工具执行完毕后的模型输出才是最终回复
-        tool_finished = False
+        # langgraph 事件流：模型节点输出带 tool_calls 的是"中间决策"（要丢弃），
+        # 无 tool_calls 的输出才是最终回复。
+        # 先缓冲节点内的 token，节点结束（on_chat_model_end）时无 tool_calls 才流出 ——
+        # 这样既正确丢弃中间轮的"我将使用工具…"措辞，也不误伤多轮工具循环。
+        pending_tokens: List[str] = []
         response_parts = []
         try:
             async for event in self.agent.astream_events(
@@ -473,14 +467,22 @@ class FlowerAgent:
                         "type": "status",
                         "content": f"正在{_tool_display_name(tool_name)}…",
                     }
-                elif kind == "on_tool_end":
-                    tool_finished = True
                 elif kind == "on_chat_model_stream":
                     chunk = event["data"].get("chunk")
                     content = getattr(chunk, "content", "") if chunk else ""
-                    if content and tool_finished:
-                        response_parts.append(content)
-                        yield {"type": "token", "content": content}
+                    if content:
+                        pending_tokens.append(content)
+                elif kind == "on_chat_model_end":
+                    output = event["data"].get("output")
+                    has_tool_calls = bool(getattr(output, "tool_calls", None))
+                    if has_tool_calls:
+                        pending_tokens.clear()  # 中间决策节点：丢弃缓冲
+                        continue
+                    # 最终回复节点：缓冲全部流出
+                    for t in pending_tokens:
+                        response_parts.append(t)
+                        yield {"type": "token", "content": t}
+                    pending_tokens.clear()
         except Exception as e:
             logger.error(f"Agent 流式异常: {e}")
             yield {"type": "error", "content": f"处理失败：{e}"}
@@ -488,11 +490,7 @@ class FlowerAgent:
 
         response_text = "".join(response_parts)
         if response_text:
-            self._update_chat_history(
-                session_id,
-                HumanMessage(content=message),
-                AIMessage(content=response_text),
-            )
+            self._update_chat_history(session_id, AIMessage(content=response_text))
 
         yield {
             "type": "done",
@@ -516,7 +514,6 @@ def _tool_display_name(tool_name: str) -> str:
     name_map = {
         "flower_recognition": "识别花卉图片",
         "knowledge_search": "搜索花卉知识库",
-        "oss_image_manager": "处理图片",
     }
     return name_map.get(tool_name, f"调用 {tool_name}")
 

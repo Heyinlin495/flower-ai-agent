@@ -56,6 +56,8 @@ services:
       - .env
     environment:
       - FLOWER_API_BASE_URL=http://backend:8000
+      # 前端进程读取 FLOWER_API_TOKEN（值来自 .env 的 API_TOKEN，为空则无鉴权）
+      - FLOWER_API_TOKEN=${API_TOKEN}
     ports:
       - "8501:8501"
     depends_on:

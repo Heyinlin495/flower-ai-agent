@@ -10,9 +10,27 @@ Author: 何胤霖 (Yinlin He)
 import streamlit as st
 import requests
 import time
+import json
 from datetime import datetime
+from pathlib import Path
 
-from config import API_BASE_URL
+from config import API_BASE_URL, APP_VERSION
+from api import auth_headers
+
+# 侧边栏会话列表组件资产（ChatGPT 风格，JS 渲染）
+_SESSION_CSS = (Path(__file__).parent / "assets" / "session_sidebar.css").read_text(encoding="utf-8")
+_SESSION_HTML = (Path(__file__).parent / "assets" / "session_sidebar.html").read_text(encoding="utf-8")
+_SESSION_JS = (Path(__file__).parent / "assets" / "session_sidebar.js").read_text(encoding="utf-8")
+
+# CCv2 组件：isolate_styles=True 时 HTML/CSS/JS 都在组件 shadow root 内，
+# CSS 作用于组件内部元素（#sessionSidebarRoot .session-*），不会污染全局。
+_session_list = st.components.v2.component(
+    "session_sidebar_list",
+    html=_SESSION_HTML,
+    css=_SESSION_CSS,
+    js=_SESSION_JS,
+    isolate_styles=True,
+)
 
 # 页面配置
 st.set_page_config(
@@ -25,10 +43,17 @@ st.set_page_config(
 
 MAX_SESSIONS = 20  # 最多保留 20 个历史会话
 
+
+def _make_session_id() -> str:
+    """生成唯一会话 ID（时间戳 + 随机后缀，避免同一秒内重复）"""
+    import uuid
+    return f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+
+
 if "_sessions" not in st.session_state:
     st.session_state._sessions = {}  # {sid: {"title": str, "messages": list, "ts": str}}
 if "session_id" not in st.session_state:
-    sid = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    sid = _make_session_id()
     st.session_state.session_id = sid
     st.session_state._sessions[sid] = {"title": "新会话", "messages": [], "ts": datetime.now().isoformat()}
 if "messages" not in st.session_state:
@@ -57,7 +82,9 @@ def load_session(sid: str):
     """切换到指定会话"""
     if sid == st.session_state.session_id:
         return
-    _save_session()
+    # 当前会话有消息才保存（避免空会话产生多余记录）
+    if st.session_state.messages:
+        _save_session()
     data = st.session_state._sessions[sid]
     st.session_state.session_id = sid
     # 优先从后端拉取该会话历史；拉不到时退回本地缓存
@@ -66,9 +93,11 @@ def load_session(sid: str):
 
 
 def new_session():
-    """创建新会话并保存当前会话"""
-    _save_session()
-    sid = f"session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    """创建新会话（不保存当前空会话，避免产生多余的"新会话"记录）"""
+    # 当前会话有消息才保存（避免空会话也落盘成一条记录）
+    if st.session_state.messages:
+        _save_session()
+    sid = _make_session_id()
     st.session_state._sessions[sid] = {"title": "新会话", "messages": [], "ts": datetime.now().isoformat()}
     st.session_state.session_id = sid
     st.session_state.messages = []
@@ -82,18 +111,25 @@ def new_session():
 
 
 def delete_session(sid: str):
-    """删除指定会话（同时清除后端历史）"""
+    """删除指定会话（同时清除后端历史，不切会话避免网络等待卡顿）"""
     sessions = st.session_state._sessions
     if sid in sessions:
         del sessions[sid]
-    # 同步删除后端会话历史
+    # 同步删除后端会话历史（静默，不阻塞 UI）
     clear_backend_history(sid)
-    # 如果删除的是当前会话，切换到最新的
-    if sid == st.session_state.session_id and sessions:
-        latest = max(sessions.keys(), key=lambda k: sessions[k]["ts"])
-        load_session(latest)
-    elif not sessions:
-        new_session()
+    # 如果删除的是当前会话：重置为全新空会话（无网络请求，秒开）
+    # 不复用 load_session（内部 fetch_backend_history 同步请求会卡顿）
+    # 全删光时：直接重置当前会话为空，不再 new_session（避免"新建两个"）
+    if sid == st.session_state.session_id:
+        if sessions:
+            # 有剩余会话：直接切到最新的，但不拉后端历史（用本地缓存，快）
+            latest = max(sessions.keys(), key=lambda k: sessions[k]["ts"])
+            st.session_state.session_id = latest
+            st.session_state.messages = list(sessions[latest]["messages"])
+        else:
+            # 全删光了：当前会话重置为全新空会话
+            st.session_state.session_id = _make_session_id()
+            st.session_state.messages = []
 
 
 def clear_current_messages():
@@ -114,7 +150,7 @@ def check_backend_health() -> bool:
     if cache and (now - cache["ts"] < _HEALTH_CACHE_TTL):
         return cache["ok"]
     try:
-        resp = requests.get(f"{API_BASE_URL}/health", timeout=1)
+        resp = requests.get(f"{API_BASE_URL}/health", headers=auth_headers(), timeout=1)
         ok = resp.status_code == 200
     except Exception:
         ok = False
@@ -123,11 +159,12 @@ def check_backend_health() -> bool:
 
 
 def fetch_backend_history(session_id: str) -> list:
-    """从后端拉取会话历史（失败返回空列表，不阻塞页面）"""
+    """从后端拉取会话历史（失败返回空列表，短超时避免卡顿）"""
     try:
         resp = requests.get(
             f"{API_BASE_URL}/api/chat/history/{session_id}",
-            timeout=5,
+            headers=auth_headers(),
+            timeout=2,
         )
         if resp.status_code == 200:
             return resp.json().get("messages", [])
@@ -137,32 +174,48 @@ def fetch_backend_history(session_id: str) -> list:
 
 
 def restore_sessions_from_backend():
-    """把后端持久化的会话合并进本地 _sessions（保留本地已存在项）"""
+    """把后端持久化的会话合并进本地 _sessions（保留本地已存在项，合并空"新会话"）"""
     try:
-        resp = requests.get(f"{API_BASE_URL}/api/chat/sessions", timeout=5)
+        resp = requests.get(f"{API_BASE_URL}/api/chat/sessions", headers=auth_headers(), timeout=5)
         if resp.status_code != 200:
             return
+        # 本地已有的空"新会话"：后端恢复时不再重复添加
+        local_has_empty_new = any(
+            v["title"] == "新会话" and not v["messages"]
+            for v in st.session_state._sessions.values()
+        )
         for s in resp.json().get("sessions", []):
             sid = s["id"]
-            if sid not in st.session_state._sessions:
-                st.session_state._sessions[sid] = {
-                    "title": s["title"] or "新会话",
-                    "messages": [],
-                    "ts": s["updated_at"] or s["created_at"],
-                }
+            if sid in st.session_state._sessions:
+                continue
+            title = s["title"] or "新会话"
+            # 后端也是空"新会话"，且本地已有空新会话 → 跳过（避免重复）
+            if title == "新会话" and local_has_empty_new:
+                continue
+            st.session_state._sessions[sid] = {
+                "title": title,
+                "messages": [],
+                "ts": s["updated_at"] or s["created_at"],
+            }
     except Exception:
         pass
 
 
 def clear_backend_history(session_id: str):
-    """删除后端会话历史（失败静默）"""
-    try:
-        requests.delete(
-            f"{API_BASE_URL}/api/chat/history/{session_id}",
-            timeout=5,
-        )
-    except Exception:
-        pass
+    """删除后端会话历史（后台线程执行，不阻塞 UI；失败静默）"""
+    import threading
+
+    def _do_delete():
+        try:
+            requests.delete(
+                f"{API_BASE_URL}/api/chat/history/{session_id}",
+                headers=auth_headers(),
+                timeout=2,
+            )
+        except Exception:
+            pass
+
+    threading.Thread(target=_do_delete, daemon=True).start()
 
 
 # ── 侧边栏（温馨风格） ─────────────────────────────────────────────────────
@@ -185,6 +238,23 @@ def _format_relative_time(ts_iso: str) -> str:
         return f"昨天 {dt.strftime('%H:%M')}"
     return dt.strftime("%m-%d %H:%M")
 
+
+# ── 侧边栏（品牌 + 会话管理） ───────────────────────────────────────────
+
+# 会话列表可滚动（限制高度，避免长列表撑爆侧栏）
+st.markdown(
+    """
+    <style>
+    [data-testid="stSidebar"] [data-testid="stVerticalBlockBorderWrapper"] {
+        max-height: 320px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(0,0,0,0.15) transparent;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.sidebar:
     # ── 从后端恢复会话列表（仅首次，刷新页面后历史不丢） ──────────────
@@ -218,7 +288,7 @@ with st.sidebar:
         clear_current_messages()
         st.rerun()
 
-    st.space("small")
+    st.divider()
 
     # ── 系统状态（紧凑一行） ─────────────────────────────────────────────
 
@@ -229,7 +299,7 @@ with st.sidebar:
 
     st.space("small")
 
-    # ── 会话历史列表 ──────────────────────────────────────────────────────
+    # ── 会话历史列表（ChatGPT 风格，JS 渲染 + 回传） ─────────────────────
 
     sorted_sessions = sorted(
         st.session_state._sessions.items(),
@@ -238,36 +308,50 @@ with st.sidebar:
     )
     current_sid = st.session_state.session_id
 
-    st.markdown(f"**历史会话** · {len(sorted_sessions)}")
-    st.caption("点击会话切换，✕ 删除")
+    st.markdown("**历史会话**")
 
-    for sid, data in sorted_sessions:
-        is_active = sid == current_sid
-        title = data["title"]
-        ts = _format_relative_time(data.get("ts", ""))
+    # 注入会话数据给 JS 组件
+    _session_data = [
+        {
+            "id": sid,
+            "title": data.get("title", "新会话"),
+            "ts": _format_relative_time(data.get("ts", "")),
+        }
+        for sid, data in sorted_sessions
+    ]
+    # CCv2 触发值（select/delete）在触发后的下一次 rerun 仍会保留一次
+    # （不会立即清除），若每次 rerun 都处理会"连坐"重复删除。
+    # 这里用 session_state 记录已消费的触发 sid，同一 sid 只处理一次。
+    if "_consumed_trigger" not in st.session_state:
+        st.session_state._consumed_trigger = {"select": None, "delete": None}
 
-        with st.container(horizontal=True, gap="small", border=is_active):
-            if st.button(
-                title,
-                key=f"hist_{sid}",
-                type="primary" if is_active else "secondary",
-                help=ts,
-            ):
-                load_session(sid)
-                st.rerun()
-            if st.button(
-                ":material/close:",
-                key=f"del_{sid}",
-                help=f"删除「{title}」",
-            ):
-                delete_session(sid)
-                st.rerun()
+    _session_result = _session_list(
+        key="session_sidebar_v1",
+        data={"sessions": _session_data, "current_sid": current_sid},
+        on_select_change=lambda: None,
+        on_delete_change=lambda: None,
+    )
+    _sel = _session_result.select
+    _del = _session_result.delete
+
+    # 消费触发值（去重：同一 sid 不重复处理）
+    _sel_value = _sel.get("value") if isinstance(_sel, dict) else None
+    if _sel_value and _sel_value != st.session_state._consumed_trigger["select"]:
+        st.session_state._consumed_trigger["select"] = _sel_value
+        load_session(_sel_value)
+        st.rerun()
+
+    _del_value = _del.get("value") if isinstance(_del, dict) else None
+    if _del_value and _del_value != st.session_state._consumed_trigger["delete"]:
+        st.session_state._consumed_trigger["delete"] = _del_value
+        delete_session(_del_value)
+        st.rerun()
 
     st.space("medium")
 
     # 底部版本与作者信息
-    st.caption("花卉识别 AI Agent · v1.1")
-    st.caption("👨‍💻 何胤霖")
+    st.caption(f"花卉识别 AI Agent · {APP_VERSION}")
+    st.caption("👨‍💻 何胤霖 ❤️ 👧 淋淋大王")
 
 # ── 页面导航 ──────────────────────────────────────────────────────────────────
 

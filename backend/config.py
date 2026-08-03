@@ -91,14 +91,34 @@ class Settings(BaseSettings):
         default=8000,
         description="应用监听端口"
     )
+    APP_VERSION: str = Field(
+        default="1.1",
+        description="应用版本（根路径/健康检查/文档统一使用）"
+    )
+    # API Bearer Token 鉴权：非空时所有 /api/* 请求必须带 Authorization: Bearer <token>；
+    # 为空则跳过校验（本地开发）。生产环境务必设置，防止公网裸奔被刷额度/删知识库。
+    API_TOKEN: str = Field(
+        default="",
+        description="API 访问令牌（Bearer），为空则不启用鉴权"
+    )
     DEBUG: bool = Field(
-        default=True,
-        description="调试模式"
+        default=False,
+        description="调试模式（生产环境请保持 False，.env 可显式开启）"
     )
     # CORS 允许来源（逗号分隔，.env 可覆盖；默认本地开发来源）
     CORS_ALLOW_ORIGINS: str = Field(
         default="http://localhost:8501,http://127.0.0.1:8501",
         description="允许的跨域来源，逗号分隔"
+    )
+    # 图片上传大小上限（字节），默认 10MB
+    MAX_UPLOAD_SIZE: int = Field(
+        default=10 * 1024 * 1024,
+        description="图片上传大小上限（字节）"
+    )
+    # 是否强制重建知识库索引（默认 False：已有索引时跳过全量 embedding）
+    KNOWLEDGE_FORCE_REINDEX: bool = Field(
+        default=False,
+        description="为 True 时启动强制重建向量索引"
     )
 
     @property

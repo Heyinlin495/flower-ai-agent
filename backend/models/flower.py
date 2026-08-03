@@ -117,7 +117,3 @@ class FlowerRecognitionResult(BaseModel):
         default=None,
         description="错误信息（识别失败时）"
     )
-    raw_response: Optional[str] = Field(
-        default=None,
-        description="模型原始返回"
-    )

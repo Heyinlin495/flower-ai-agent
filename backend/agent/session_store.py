@@ -126,6 +126,46 @@ class SessionStore:
         )
         conn.commit()
 
+    def add_messages(self, session_id: str, messages: List[dict]) -> None:
+        """
+        批量添加消息（单事务）。
+
+        用于前端图片识别等不走 Agent 的回合：用户消息（含 image_url）
+        与助手回复一次落盘，刷新后历史不丢。
+
+        Args:
+            session_id: 会话 ID
+            messages: [{"role": ..., "content": ..., "image_url": ...}]
+        """
+        if not messages:
+            return
+        self._ensure_init()
+        conn = _get_conn()
+        now = datetime.now().isoformat()
+        conn.execute(
+            "INSERT OR IGNORE INTO sessions (id, title, created_at, updated_at) VALUES (?, '新会话', ?, ?)",
+            (session_id, now, now),
+        )
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            image_url = m.get("image_url")
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, image_url, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, role, content, image_url, now),
+            )
+            # 首条 user 文本消息自动推导标题（与 add_message 逻辑一致）
+            if role == "user" and not image_url and content:
+                conn.execute(
+                    "UPDATE sessions SET title = ? WHERE id = ? AND title = '新会话'",
+                    (content[:30], session_id),
+                )
+        conn.execute(
+            "UPDATE sessions SET updated_at = ? WHERE id = ?",
+            (now, session_id),
+        )
+        conn.commit()
+
     def get_messages(self, session_id: str) -> List[dict]:
         """获取会话消息（按时间正序）"""
         self._ensure_init()

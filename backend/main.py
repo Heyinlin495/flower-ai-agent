@@ -8,9 +8,8 @@ Author: 何胤霖 (Yinlin He)
 
 import logging
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 from .config import settings
 from .api.chat_router import router as chat_router
@@ -51,11 +50,25 @@ async def lifespan(app: FastAPI):
     logger.info("花卉识别 AI Agent 正在关闭...")
 
 
+def verify_api_token(request: Request):
+    """
+    API 访问鉴权（依赖注入到所有 /api/* 路由）。
+
+    未配置 API_TOKEN 时跳过校验（本地开发）；
+    配置后要求请求头 Authorization: Bearer <token>，否则 401。
+    """
+    if not settings.API_TOKEN:
+        return
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {settings.API_TOKEN}":
+        raise HTTPException(status_code=401, detail="未授权访问")
+
+
 # 创建 FastAPI 应用
 app = FastAPI(
     title="花卉识别 AI Agent",
     description="基于 LangChain 和 RAG 的花卉识别智能聊天系统",
-    version="1.0.0",
+    version=settings.APP_VERSION,
     lifespan=lifespan
 )
 
@@ -68,9 +81,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 注册路由
-app.include_router(chat_router)
-app.include_router(flower_router)
+# 注册路由（全部挂鉴权依赖；/health、/docs 等非 /api 路径不受影响）
+app.include_router(chat_router, dependencies=[Depends(verify_api_token)])
+app.include_router(flower_router, dependencies=[Depends(verify_api_token)])
 
 
 @app.get("/")
@@ -83,7 +96,7 @@ async def root():
     """
     return {
         "message": "欢迎使用花卉识别 AI Agent",
-        "version": "1.0.0",
+        "version": settings.APP_VERSION,
         "docs": "/docs",
         "endpoints": {
             "chat": "/api/chat/send",

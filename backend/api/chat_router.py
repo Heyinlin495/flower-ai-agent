@@ -4,18 +4,153 @@
 提供聊天相关的 API 接口，支持普通响应和 SSE 流式响应
 """
 
+import asyncio
+import base64
 import json
 import logging
+import tempfile
+import traceback
+from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
-from typing import Optional
+from typing import Optional, List
+from pydantic import BaseModel, Field
 
 from ..models.chat import ChatRequest, ChatResponse
 from ..agent.flower_agent import flower_agent
+from ..agent.session_store import session_store
+from ..config import settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/chat", tags=["聊天"])
+
+
+def _error_detail(msg: str, max_len: int = 200) -> str:
+    """错误响应统一格式：截断的简短消息（完整堆栈只进日志）"""
+    return msg[:max_len] if msg else "处理失败，请稍后重试"
+
+
+# ── 消息持久化（前端图片识别回合不走 Agent，需单独落盘） ─────────────────
+
+class PersistMessage(BaseModel):
+    """待持久化的单条消息"""
+    role: str = Field(description="消息角色: user / assistant")
+    content: str = Field(default="", description="消息文本内容")
+    image_url: Optional[str] = Field(default=None, description="图片 URL（如有）")
+
+
+class PersistMessagesRequest(BaseModel):
+    """批量持久化消息请求"""
+    session_id: str = Field(description="会话 ID")
+    messages: List[PersistMessage] = Field(description="消息列表")
+
+
+@router.post("/messages")
+async def persist_messages(request: PersistMessagesRequest):
+    """
+    批量持久化会话消息（前端图片识别回合调用，刷新后历史不丢）
+
+    Returns:
+        dict: 操作结果
+    """
+    try:
+        msgs = [
+            {"role": m.role, "content": m.content, "image_url": m.image_url}
+            for m in request.messages
+            if m.role in ("user", "assistant")
+        ]
+        if not msgs:
+            raise HTTPException(status_code=400, detail="消息列表为空或角色不合法")
+        session_store.add_messages(request.session_id, msgs)
+        return {"success": True, "message": f"已持久化 {len(msgs)} 条消息"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"持久化消息异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="持久化消息失败，请稍后重试")
+
+
+# ── 语音识别（DashScope Paraformer，移出前端进程避免阻塞 UI） ─────────────
+
+class TranscribeRequest(BaseModel):
+    """语音识别请求"""
+    audio: str = Field(description="音频数据（base64 编码）")
+    format: str = Field(default="wav", description="音频格式")
+    sample_rate: int = Field(default=16000, description="采样率")
+
+
+class TranscribeResponse(BaseModel):
+    """语音识别响应"""
+    success: bool
+    text: str = Field(default="", description="识别文本")
+    error: str = Field(default="", description="失败原因（成功时为空）")
+
+
+def _transcribe_sync(audio_b64: str, audio_format: str, sample_rate: int) -> dict:
+    """同步语音识别（dashscope 阻塞调用，放进线程池执行）"""
+    if not settings.DASHSCOPE_API_KEY:
+        return {"success": False, "text": "", "error": "缺少 DashScope API Key（.env 中 DASHSCOPE_API_KEY）"}
+    try:
+        from dashscope.audio.asr import Recognition
+        from dashscope.audio.asr.recognition import RecognitionCallback
+
+        audio_bytes = base64.b64decode(audio_b64)
+        with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as f:
+            f.write(audio_bytes)
+            tmp_path = f.name
+        try:
+            # Recognition 构造必须传 callback（实时流式接口），
+            # 离线文件识别用空 callback 即可（call() 处理完整文件后一次性返回）
+            rec = Recognition(
+                model="paraformer-realtime-v2",
+                format=audio_format,
+                sample_rate=sample_rate,
+                callback=RecognitionCallback(),
+                api_key=settings.DASHSCOPE_API_KEY,
+            )
+            result = rec.call(tmp_path)
+            if result and getattr(result, "status_code", 500) == 200:
+                sentences = result.get_sentence() or []
+                text = "".join(s.get("text", "") for s in sentences)
+                if text:
+                    return {"success": True, "text": text, "error": ""}
+                return {"success": False, "text": "", "error": "未能识别到语音内容，请重新录音"}
+            code = getattr(result, "code", "") or ""
+            msg = getattr(result, "message", "") or ""
+            logger.warning(f"语音识别失败: code={code}, message={msg}")
+            return {"success": False, "text": "", "error": msg or "语音识别失败"}
+        finally:
+            try:
+                Path(tmp_path).unlink()
+            except OSError:
+                pass
+    except Exception as e:
+        logger.warning(f"语音识别异常: {e}")
+        return {"success": False, "text": "", "error": f"语音识别服务异常：{e}"}
+
+
+@router.post("/transcribe", response_model=TranscribeResponse)
+async def transcribe(request: TranscribeRequest):
+    """
+    语音转文字（DashScope Paraformer）
+
+    前端录音文件以 base64 上传，阻塞调用在线程池执行，不卡 event loop。
+
+    Args:
+        request: base64 音频 + 格式参数
+
+    Returns:
+        TranscribeResponse: 识别文本或错误原因
+    """
+    try:
+        result = await asyncio.to_thread(
+            _transcribe_sync, request.audio, request.format, request.sample_rate
+        )
+        return TranscribeResponse(**result)
+    except Exception as e:
+        logger.error(f"语音识别路由异常: {e}\n{traceback.format_exc()}")
+        return TranscribeResponse(success=False, text="", error="语音识别服务异常，请稍后重试")
 
 
 @router.post("/send", response_model=ChatResponse)
@@ -34,8 +169,8 @@ async def send_message(request: ChatRequest):
     try:
         logger.info(f"收到聊天消息: {request.message[:50]}...")
 
-        # 调用 Agent 处理消息
-        result = flower_agent.chat(
+        # 调用 Agent 处理消息（异步版，避免阻塞 event loop）
+        result = await flower_agent.achat(
             message=request.message,
             session_id=request.session_id,
             image_url=request.image_url
@@ -49,17 +184,18 @@ async def send_message(request: ChatRequest):
                 image_url=result.get("image_url"),
                 timestamp=result["timestamp"]
             )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail=result.get("error", "处理消息失败")
-            )
+        # 业务失败 → 200 + success:false（与知识库接口风格一致，协议错误才用 4xx/5xx）
+        logger.error(f"聊天处理失败: {result.get('error')}")
+        return ChatResponse(
+            success=False,
+            message=_error_detail(result.get("error", "处理消息失败")),
+            session_id=request.session_id or "",
+            timestamp=result.get("timestamp"),
+        )
 
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"聊天消息处理异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"聊天消息处理异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="聊天处理失败，请稍后重试")
 
 
 @router.post("/stream")
@@ -104,8 +240,8 @@ async def stream_message(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.error(f"流式聊天异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"流式聊天异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="流式聊天启动失败，请稍后重试")
 
 
 @router.get("/sessions")
@@ -124,8 +260,8 @@ async def list_chat_sessions():
             "total": len(sessions)
         }
     except Exception as e:
-        logger.error(f"列出会话异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"列出会话异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="列出会话失败，请稍后重试")
 
 
 @router.get("/history/{session_id}")
@@ -148,8 +284,8 @@ async def get_chat_history(session_id: str):
             "total": len(history)
         }
     except Exception as e:
-        logger.error(f"获取聊天历史异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"获取聊天历史异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="获取聊天历史失败，请稍后重试")
 
 
 @router.delete("/history/{session_id}")
@@ -170,31 +306,5 @@ async def clear_chat_history(session_id: str):
             "message": "聊天历史已清除" if success else "会话不存在"
         }
     except Exception as e:
-        logger.error(f"清除聊天历史异常: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/test")
-async def test_agent():
-    """
-    测试 Agent 是否正常工作
-
-    Returns:
-        dict: 测试结果
-    """
-    try:
-        result = flower_agent.chat(
-            message="你好，请介绍一下你自己",
-            session_id="test_session"
-        )
-        return {
-            "success": True,
-            "message": "Agent 测试成功",
-            "response": result
-        }
-    except Exception as e:
-        logger.error(f"Agent 测试失败: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        logger.error(f"清除聊天历史异常: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="清除聊天历史失败，请稍后重试")
