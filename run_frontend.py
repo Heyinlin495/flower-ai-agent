@@ -7,6 +7,10 @@
 import subprocess
 import sys
 
+# 强制 UTF-8 输出：中文 Windows cmd 默认 GBK，打印 emoji 会 UnicodeEncodeError 闪退
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
+
 
 def main():
     """启动前端应用"""

@@ -33,6 +33,8 @@ if "session_id" not in st.session_state:
     st.session_state._sessions[sid] = {"title": "新会话", "messages": [], "ts": datetime.now().isoformat()}
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "_pending_images" not in st.session_state:
+    st.session_state._pending_images = []  # 输入框上方"待发送"图片预览（由 chat.py 维护）
 
 
 def _save_session():
@@ -97,6 +99,7 @@ def delete_session(sid: str):
 def clear_current_messages():
     """清空当前会话消息（不删除会话）"""
     st.session_state.messages = []
+    st.session_state._pending_images = []
 
 
 # ── API 工具 ──────────────────────────────────────────────────────────────────
@@ -203,6 +206,16 @@ with st.sidebar:
         type="primary",
     ):
         new_session()
+        st.rerun()
+
+    # 清空当前会话消息（不删除会话）
+    if st.button(
+        "清除聊天",
+        icon=":material/delete:",
+        width="stretch",
+        disabled=not st.session_state.messages,
+    ):
+        clear_current_messages()
         st.rerun()
 
     st.space("small")

@@ -2,51 +2,68 @@
 chcp 65001 >nul 2>&1
 setlocal enabledelayedexpansion
 
-:: Check if silent mode
+:: Silent mode: skip banners and pause (used by restart.bat as "stop.bat /silent")
 set "SILENT=0"
-if "%1"=="/silent" set "SILENT=1"
+if /i "%1"=="/silent" set "SILENT=1"
 
 if "%SILENT%"=="0" (
-    echo ======================================================
-    echo         Flower AI Agent - One Click Stop
-    echo ======================================================
-    echo.
-    echo [INFO] Stopping services...
+    echo ============================================================
+    echo           Flower AI Agent - Shutdown Script
+    echo ============================================================
     echo.
 )
 
-:: Kill backend process (port 8000)
-if "%SILENT%"=="0" echo [INFO] Stopping backend server...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8000 ^| findstr LISTENING') do (
+:: ------------------------------------------------------------
+:: 1. Stop backend (port 8000)
+:: ------------------------------------------------------------
+set "FOUND=0"
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8000 " ^| findstr LISTENING') do (
+    set "FOUND=1"
     taskkill /F /PID %%a >nul 2>&1
     if not errorlevel 1 (
-        if "%SILENT%"=="0" echo [INFO] Backend stopped (PID: %%a)
+        if "%SILENT%"=="0" echo [INFO] Backend stopped. PID %%a
+    ) else (
+        if "%SILENT%"=="0" echo [WARN] Backend process PID %%a could not be stopped.
     )
 )
+if "!FOUND!"=="0" if "%SILENT%"=="0" echo [INFO] Backend is not running.
 
-:: Kill frontend process (port 8501)
-if "%SILENT%"=="0" echo [INFO] Stopping frontend...
-for /f "tokens=5" %%a in ('netstat -aon ^| findstr :8501 ^| findstr LISTENING') do (
+:: ------------------------------------------------------------
+:: 2. Stop frontend (port 8501)
+:: ------------------------------------------------------------
+set "FOUND=0"
+for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":8501 " ^| findstr LISTENING') do (
+    set "FOUND=1"
     taskkill /F /PID %%a >nul 2>&1
     if not errorlevel 1 (
-        if "%SILENT%"=="0" echo [INFO] Frontend stopped (PID: %%a)
+        if "%SILENT%"=="0" echo [INFO] Frontend stopped. PID %%a
+    ) else (
+        if "%SILENT%"=="0" echo [WARN] Frontend process PID %%a could not be stopped.
     )
 )
+if "!FOUND!"=="0" if "%SILENT%"=="0" echo [INFO] Frontend is not running.
 
-:: Kill any remaining Python processes related to our app
-if "%SILENT%"=="0" echo [INFO] Cleaning up remaining processes...
+:: ------------------------------------------------------------
+:: 3. Fallback: kill leftover console windows by title
+:: ------------------------------------------------------------
 taskkill /FI "WINDOWTITLE eq Flower AI Backend*" /F >nul 2>&1
 taskkill /FI "WINDOWTITLE eq Flower AI Frontend*" /F >nul 2>&1
 
-:: Wait a moment
-timeout /t 2 /nobreak >nul
+:: ------------------------------------------------------------
+:: 4. Give processes a moment to release the ports
+::    (ping delay works even with redirected stdin; "timeout" does not)
+:: ------------------------------------------------------------
+ping -n 3 127.0.0.1 >nul
 
 if "%SILENT%"=="0" (
     echo.
-    echo ======================================================
-    echo         Services Stopped!
-    echo ======================================================
+    echo ============================================================
+    echo           All Services Stopped!
+    echo ============================================================
     echo.
-    echo Press any key to exit...
-    pause >nul
+    echo   Use start.bat to start them again.
+    echo.
+    echo ============================================================
+    echo.
+    pause
 )
